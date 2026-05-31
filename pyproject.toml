@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "foundation"
+version = "0.1.0"
+description = "Core building blocks for services, storage, and utilities."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
+
+[tool.setuptools]
+package-dir = { "foundation" = "foundation" }
+packages = ["foundation"]
