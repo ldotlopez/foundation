@@ -10,6 +10,19 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []
 
+[project.optional-dependencies]
+scraping = [
+    "bs4>=0.0.2",
+    "markdownify>=1.2.3",
+    "readability-lxml>=0.8.4.1",
+    "trafilatura>=2.1.0",
+]
+
 [tool.setuptools]
 package-dir = { "foundation" = "foundation" }
 packages = ["foundation"]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.0",
+]
