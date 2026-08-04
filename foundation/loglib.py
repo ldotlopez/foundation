@@ -122,10 +122,12 @@ def _apply_verbosity_delta(logger: logging.Logger, verbose: int, quiet: int) -> 
 
 def setup_logger(
     logger: str | logging.Logger,
-    console: Console | None = None,
-    log_level: str | int | None = None,
     *,
+    log_level: str | int | None = None,
+    console: Console | None = None,
     configure_handler: bool = True,
+    verbose_delta: int = 0,
+    quiet_delta: int = 0,
 ) -> logging.Logger:
     """Set up one app logger: attach a Rich handler and apply a level/spec.
 
@@ -183,13 +185,15 @@ def setup_logger(
         rules = _parse_rules(log_level, base_name=logger.name)
         _apply_rules(rules)
 
+    _apply_verbosity_delta(logger, verbose_delta, quiet_delta)
+
     return logger
 
 
 def setup_logger_from_cmdline(
     logger: str | logging.Logger,
-    args: argparse.Namespace,
     *,
+    args: argparse.Namespace,
     console: Console | None = None,
     configure_handler: bool = True,
 ) -> logging.Logger:
