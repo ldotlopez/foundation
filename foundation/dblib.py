@@ -1,8 +1,8 @@
 import sqlite3
 from abc import abstractmethod
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
 
 
 class SQLite3DB:

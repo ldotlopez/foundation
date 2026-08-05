@@ -1,15 +1,15 @@
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, tzinfo
 from zoneinfo import ZoneInfo
 
 UTC_TZ = ZoneInfo("UTC")
 
 
 def now_local_ts() -> float:
-    return datetime.now().timestamp()
+    return datetime.now(tz=get_local_tz()).timestamp()
 
 
 def now_utc_ts() -> float:
-    return datetime.now(timezone.utc).timestamp()
+    return datetime.now(tz=UTC_TZ).timestamp()
 
 
 def get_local_tz() -> tzinfo:
@@ -22,7 +22,7 @@ def get_local_tz() -> tzinfo:
     return tz
 
 
-def timestamp_as_dt_aware(ts: float | int, tz: tzinfo | None = None) -> datetime:
+def timestamp_as_dt_aware(ts: float, tz: tzinfo | None = None) -> datetime:
     """Convert POSIX timestamp (seconds since the epoch, UTC) to an aware datetime in the given tz.
 
     Interprets the numeric timestamp as UTC to avoid accidental local-time interpretation, then

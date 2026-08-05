@@ -3,7 +3,10 @@ import os
 import click
 from rich.console import Console
 
-_DEFAULT_CONSOLE: Console | None = None
+from .consts import DEFAULT_LOG_LEVEL
+
+_STDOUT_CONSOLE: Console | None = None
+_STDERR_CONSOLE: Console | None = None
 
 _no_color = os.environ.get("NO_COLOR", "").lower() in ("1", "true", "yes")
 _rich_disabled = os.environ.get("RICH_DISABLED", "").lower() in (
@@ -15,13 +18,19 @@ _rich_disabled = os.environ.get("RICH_DISABLED", "").lower() in (
 RICH_ENABLED = not _no_color and not _rich_disabled
 RICH_DISABLED = not RICH_ENABLED
 
+RICH_LOG_HIDE_TIMES = os.environ.get("RICH_LOG_HIDE_TIMES", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 
 def click_logging_options(f):
     """Reusable logging-related options."""
     f = click.option(
         "--log-level",
         type=str,
-        default="warning",
+        default=DEFAULT_LOG_LEVEL,
         show_default=True,
         help=(
             "Configure Python loggers. Accepts a level (e.g. 'warning') or "
@@ -45,17 +54,36 @@ def click_logging_options(f):
     return f
 
 
-def get_default_console() -> Console:
-    """Return the process-wide default Console, creating it on first use.
+def get_stdout_console() -> Console:
+    """Return a Console that writes to stdout, creating it on first use.
 
     Note this forces terminal rendering (``force_terminal=True``) rather
     than letting Rich auto-detect a non-TTY destination -- output will
     include ANSI codes even when redirected to a file or pipe.
     """
-    global _DEFAULT_CONSOLE
-    if _DEFAULT_CONSOLE is None:
-        _DEFAULT_CONSOLE = Console(
+    global _STDOUT_CONSOLE
+    if _STDOUT_CONSOLE is None:
+        _STDOUT_CONSOLE = Console(
+            stderr=False  # , force_terminal=True, color_system="truecolor"
+        )
+
+    return _STDOUT_CONSOLE
+
+
+get_default_console = get_stdout_console
+
+
+def get_stderr_console() -> Console:
+    """Return a Console that writes to stderr, creating it on first use.
+
+    Note this forces terminal rendering (``force_terminal=True``) rather
+    than letting Rich auto-detect a non-TTY destination -- output will
+    include ANSI codes even when redirected to a file or pipe.
+    """
+    global _STDERR_CONSOLE
+    if _STDERR_CONSOLE is None:
+        _STDERR_CONSOLE = Console(
             stderr=True  # , force_terminal=True, color_system="truecolor"
         )
 
-    return _DEFAULT_CONSOLE
+    return _STDERR_CONSOLE

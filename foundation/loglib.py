@@ -51,7 +51,8 @@ import os
 from rich.console import Console
 from rich.logging import RichHandler
 
-from .clilib import get_default_console
+from .clilib import RICH_LOG_HIDE_TIMES, get_stderr_consolex
+from .consts import DEFAULT_LOG_LEVEL
 
 LOGGER = logging.getLogger(__name__)
 
@@ -76,6 +77,29 @@ _VERBOSITY_SCALE = [
     logging.INFO,
     logging.DEBUG,
 ]
+
+
+class CustomFormatter(logging.Formatter):
+    def __init__(
+        self,
+        *args,
+        max_len: int = 12,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.max_len = max_len
+
+    def format(self, record):
+        orig_name = record.name
+
+        if len(record.name) > self.max_len:
+            record.name = "…" + record.name[-self.max_len + 1 :]
+
+        record.name = "%10s" % record.name[-self.max_len :]  # noqa: UP031
+        try:
+            return super().format(record)
+        finally:
+            record.name = orig_name
 
 
 def _env_var_name(logger_name: str) -> str:
@@ -125,9 +149,9 @@ def setup_logger(
     *,
     log_level: str | int | None = None,
     console: Console | None = None,
-    configure_handler: bool = True,
     verbose_delta: int = 0,
     quiet_delta: int = 0,
+    infect: bool = True,
 ) -> logging.Logger:
     """Set up one app logger: attach a Rich handler and apply a level/spec.
 
@@ -170,14 +194,10 @@ def setup_logger(
         logger = logging.getLogger(logger)
 
     if console is None:
-        console = get_default_console()
+        console = get_stderr_console()
 
     if log_level is None:
-        log_level = os.environ.get(_env_var_name(logger.name), "warning")
-
-    if configure_handler and not _has_rich_handler(logger):
-        logger.addHandler(RichHandler(console=console))
-        logger.propagate = False
+        log_level = os.environ.get(_env_var_name(logger.name), DEFAULT_LOG_LEVEL)
 
     if isinstance(log_level, int):
         logger.setLevel(log_level)
@@ -187,6 +207,16 @@ def setup_logger(
 
     _apply_verbosity_delta(logger, verbose_delta, quiet_delta)
 
+    if infect and not _has_rich_handler(logging.root):
+        handler = RichHandler(
+            console=console,
+            rich_tracebacks=True,
+            show_time=not RICH_LOG_HIDE_TIMES,
+            repeated_times=False,
+        )
+        # handler.setFormatter(CustomFormatter("%(name)s: %(message)s"))
+        logging.root.addHandler(handler)
+
     return logger
 
 
@@ -195,7 +225,7 @@ def setup_logger_from_cmdline(
     *,
     args: argparse.Namespace,
     console: Console | None = None,
-    configure_handler: bool = True,
+    infect: bool = True,
 ) -> logging.Logger:
     """setup_logger(), driven by a parsed argparse.Namespace.
 
@@ -229,7 +259,7 @@ def setup_logger_from_cmdline(
         logger,
         console=console,
         log_level=getattr(args, "log_level", None),
-        configure_handler=configure_handler,
+        infect=infect,
     )
 
     verbose = getattr(args, "verbose", 0) or 0
@@ -246,7 +276,7 @@ def setup_logger_from_click(
     verbose: int = 0,
     quiet: int = 0,
     console: Console | None = None,
-    configure_handler: bool = True,
+    infect: bool = True,
 ) -> logging.Logger:
     """setup_logger(), for Click commands.
 
@@ -273,7 +303,7 @@ def setup_logger_from_click(
         logger,
         console=console,
         log_level=log_level,
-        configure_handler=configure_handler,
+        infect=infect,
     )
     _apply_verbosity_delta(resolved, verbose, quiet)
     return resolved
@@ -372,6 +402,6 @@ def _apply_rules(rules: list[tuple[str, int]]) -> None:
 
 __all__ = [
     "setup_logger",
-    "setup_logger_from_cmdline",
     "setup_logger_from_click",
+    "setup_logger_from_cmdline",
 ]
