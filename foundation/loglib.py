@@ -51,7 +51,7 @@ import os
 from rich.console import Console
 from rich.logging import RichHandler
 
-from .clilib import RICH_LOG_HIDE_TIMES, get_stderr_consolex
+from .clilib import RICH_LOG_HIDE_TIMES, get_stderr_console
 from .consts import DEFAULT_LOG_LEVEL
 
 LOGGER = logging.getLogger(__name__)
@@ -212,7 +212,7 @@ def setup_logger(
             console=console,
             rich_tracebacks=True,
             show_time=not RICH_LOG_HIDE_TIMES,
-            repeated_times=False,
+            omit_repeated_times=False,
         )
         # handler.setFormatter(CustomFormatter("%(name)s: %(message)s"))
         logging.root.addHandler(handler)

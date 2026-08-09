@@ -3,6 +3,7 @@ from abc import abstractmethod
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 
 class SQLite3DB:
