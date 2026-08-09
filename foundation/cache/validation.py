@@ -1,50 +1,54 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from datetime import datetime
+from typing import Protocol, runtime_checkable
 
+from ..dtlib import now_utc_ts
 from ..storage import StorageEntryMetadata
 
 
-class Validator:
+class Validator[T]:
     """Abstract base class for cache validators."""
 
     @abstractmethod
-    def is_valid(self, metadata: StorageEntryMetadata) -> bool:
+    def is_valid(self, metadata: T) -> bool:
         """Check if a cache entry's metadata is valid."""
         ...
 
 
-class NullValidator(Validator):
+class NullValidator(Validator[StorageEntryMetadata]):
     """Validator that accepts all entries."""
 
     def is_valid(self, metadata: StorageEntryMetadata) -> bool:
         return True
 
 
-class StorageValidator(Validator):
-    """Legacy alias for validators that operate on StorageEntryMetadata."""
+@runtime_checkable
+class HasModifiedTime(Protocol):
+    """Structural contract for metadata carrying a modification time.
+
+    TTLValidator only needs a timestamp, not any particular storage
+    backend's representation of one. Any StorageEntryMetadata subclass
+    (disk, sqlite, etc.) satisfies this by exposing modified_at,
+    without cache/validation.py needing to import or know about that
+    backend.
+    """
+
+    @property
+    def modified_at(self) -> float: ...
 
 
-class StatValidator(StorageValidator):
+class TTLValidator(Validator[HasModifiedTime]):
     """Validator based on modification time metadata."""
 
     def __init__(self, expiration_time: float):
         self.expiration_time: float = expiration_time
 
-    def _now_ts(self) -> float:
-        return datetime.now().timestamp()
-
-    def is_valid(self, metadata: StorageEntryMetadata) -> bool:
+    def is_valid(self, metadata: HasModifiedTime) -> bool:
         """Check if a cache entry hasn't expired based on modification time.
 
         Returns:
             True if the entry is still valid (not expired), False otherwise
         """
-        delta = self._now_ts() - metadata.modified_at
+        delta = now_utc_ts() - metadata.modified_at
         return delta <= self.expiration_time
-
-
-# Keep old names for backwards compatibility
-ValidationPolicy = Validator
-NullValidationPolicy = NullValidator

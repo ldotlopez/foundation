@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
+from typing import Any
 
 from ..storage import (
     BaseStorage,
     DiskStorage,
-    ItemNotFoundError,
+    EntryNotFoundError,
     StorageEntryMetadata,
 )
 from .exc import ExpiredKeyError, MissingKeyError
@@ -21,29 +22,28 @@ class Cache:
     def __init__(
         self,
         storage: BaseStorage | None = None,
-        validator: Validator | None = None,
+        validator: Validator[Any] | None = None,
     ):
         self.storage = storage or DiskStorage()
-        self.validator = validator or NullValidator()
+        self.validator: Validator[Any] = validator or NullValidator()
 
     def set(self, key: str, value: bytes) -> None:
         self.storage.set(key, value)
 
     def get(self, key: str) -> bytes:
-        if not isinstance(self.validator, NullValidator):
-            try:
-                entry = self.storage.get_metadata(key)
-            except ItemNotFoundError as e:
-                raise MissingKeyError(key) from e
+        try:
+            entry = self.storage.get_metadata(key)
+        except EntryNotFoundError as e:
+            raise MissingKeyError(key) from e
 
-            if not self.validator.is_valid(entry):
-                # Entry is invalid, delete it and raise an error
-                self.storage.delete(key)
-                raise ExpiredKeyError(key)
+        if not self.validator.is_valid(entry):
+            # Entry is invalid, delete it and raise an error
+            self.storage.delete(key)
+            raise ExpiredKeyError(key)
 
         try:
             return self.storage.get(key)
-        except ItemNotFoundError as e:
+        except EntryNotFoundError as e:
             raise MissingKeyError(key) from e
 
     def delete(self, key: str) -> None:
@@ -59,7 +59,7 @@ class Cache:
         for key in list(self.storage.iter()):
             try:
                 entry = self.storage.get_metadata(key)
-            except ItemNotFoundError:
+            except EntryNotFoundError:
                 continue
 
             if not self.validator.is_valid(entry):
@@ -67,5 +67,11 @@ class Cache:
 
                 if not dry_run:
                     self.storage.delete(key)
+
+        # Storage-level maintenance (e.g. empty shard dirs), unrelated
+        # to entry validity but a natural time to sweep since prune()
+        # is already the "do some upkeep" entry point.
+        if removed_entries:
+            self.storage.cleanup(dry_run=dry_run)
 
         return removed_entries
