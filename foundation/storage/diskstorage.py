@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
-from typing import Iterator
 
 from . import BaseStorage, ItemNotFoundError, StorageEntryMetadata
 
@@ -57,6 +56,7 @@ class DiskStorage(BaseStorage):
         # Check the glob expresion against _build_path structure
         yield from (x.name for x in self.base_dir.rglob("*/*") if x.is_file())
 
-    @lru_cache
     def _build_path(self, key: str) -> Path:
+        if not key or "/" in key or "\\" in key or key in (".", ".."):
+            raise ValueError(f"Invalid key: {key!r}")
         return Path(self.base_dir / key[0:2] / key)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Iterator
+from collections.abc import Iterator
 
 from ..storage import (
     BaseStorage,
@@ -56,7 +56,7 @@ class Cache:
         """Remove invalid entries according to validator."""
         removed_entries: list[StorageEntryMetadata] = []
 
-        for key in self.storage.iter():
+        for key in list(self.storage.iter()):
             try:
                 entry = self.storage.get_metadata(key)
             except ItemNotFoundError:
