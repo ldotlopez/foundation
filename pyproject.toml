@@ -18,9 +18,10 @@ scraping = [
     "trafilatura>=2.1.0",
 ]
 
-[tool.setuptools]
-package-dir = { "foundation" = "foundation" }
-packages = ["foundation"]
+# # Not needed
+# [tool.setuptools]
+# package-dir = { "foundation" = "foundation" }
+# packages = ["foundation"]
 
 [dependency-groups]
 dev = [

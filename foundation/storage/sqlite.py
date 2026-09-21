@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 from collections.abc import Iterator
@@ -19,6 +20,8 @@ class SqliteStorageEntryMetadata(StorageEntryMetadata):
     """SQLite-specific metadata for a storage entry."""
 
     modified_at: float
+    last_access_time: float
+    size: int
 
 
 class SqliteStorage(BaseStorage):
@@ -30,6 +33,13 @@ class SqliteStorage(BaseStorage):
     opinion about JSON. Encode with foundation.jsonlib (or anything
     else) before calling set(), and decode after get() - the same
     way callers would encode/decode before/after DiskStorage.
+
+    Schema note: CREATE TABLE IF NOT EXISTS means an existing
+    database file created before last_access_time/size existed won't
+    be migrated automatically - opening one will fail on the first
+    write, since those columns are NOT NULL with no default. No
+    migration path is provided (pre-1.0, no persisted-data
+    compatibility guarantee yet).
     """
 
     def __init__(self, db_path: Path | None = None):
@@ -66,16 +76,28 @@ class SqliteStorage(BaseStorage):
             f"CREATE TABLE IF NOT EXISTS {_TABLE} ("
             "key TEXT PRIMARY KEY, "
             "value BLOB NOT NULL, "
-            "modified_at REAL NOT NULL"
+            "modified_at REAL NOT NULL, "
+            "last_access_time REAL NOT NULL, "
+            "size INTEGER NOT NULL"
             ")"
         )
 
     def set(self, key: str, value: bytes) -> None:
+        # last_access_time is seeded to the write time - an entry
+        # that's never been read yet has no more meaningful "last
+        # accessed" value than "when it was written".
+        now = now_utc_ts()
+
         self._conn.execute(
-            f"INSERT INTO {_TABLE} (key, value, modified_at) VALUES (?, ?, ?) "
+            f"INSERT INTO {_TABLE} "
+            "(key, value, modified_at, last_access_time, size) "
+            "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET "
-            "value = excluded.value, modified_at = excluded.modified_at",
-            (key, value, now_utc_ts()),
+            "value = excluded.value, "
+            "modified_at = excluded.modified_at, "
+            "last_access_time = excluded.last_access_time, "
+            "size = excluded.size",
+            (key, value, now, now, len(value)),
         )
 
     def get(self, key: str) -> bytes:
@@ -91,11 +113,36 @@ class SqliteStorage(BaseStorage):
 
     def get_metadata(self, key: str) -> SqliteStorageEntryMetadata:
         row = self._conn.execute(
-            f"SELECT modified_at FROM {_TABLE} WHERE key = ?", (key,)
+            f"SELECT modified_at, last_access_time, size FROM {_TABLE} WHERE key = ?",
+            (key,),
         ).fetchone()
         if row is None:
             raise EntryNotFoundError(key)
-        return SqliteStorageEntryMetadata(key=key, modified_at=row[0])
+
+        return SqliteStorageEntryMetadata(
+            key=key, modified_at=row[0], last_access_time=row[1], size=row[2]
+        )
+
+    def get_and_touch(self, key: str) -> tuple[bytes, SqliteStorageEntryMetadata]:
+        """Read a value and record the access, atomically - a single
+        UPDATE ... RETURNING statement, protected by SQLite's own
+        locking against other connections.
+        """
+        row = self._conn.execute(
+            f"UPDATE {_TABLE} SET last_access_time = ? WHERE key = ? "
+            "RETURNING value, modified_at, last_access_time, size",
+            (now_utc_ts(), key),
+        ).fetchone()
+        if row is None:
+            raise EntryNotFoundError(key)
+
+        value, modified_at, last_access_time, size = row
+        return bytes(value), SqliteStorageEntryMetadata(
+            key=key,
+            modified_at=modified_at,
+            last_access_time=last_access_time,
+            size=size,
+        )
 
     def iter(self) -> Iterator[str]:
         # Lazy cursor, same contract as DiskStorage.iter(): callers
@@ -114,3 +161,25 @@ class SqliteStorage(BaseStorage):
         instead of waiting on garbage collection.
         """
         self._conn.close()
+
+    @contextlib.contextmanager
+    def lock(self) -> Iterator[None]:
+        """Cross-process mutual exclusion via a real SQLite write
+        transaction. BEGIN IMMEDIATE acquires SQLite's reserved lock
+        immediately (rather than deferring until the first write),
+        so a concurrent connection attempting the same is blocked
+        for the duration - exactly the exclusion Cache.prune()'s
+        scan-decide-evict sequence needs.
+
+        isolation_level=None (autocommit) is temporarily overridden
+        by this explicit BEGIN/COMMIT pair - normal operations
+        outside this context manager are unaffected.
+        """
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        else:
+            self._conn.execute("COMMIT")

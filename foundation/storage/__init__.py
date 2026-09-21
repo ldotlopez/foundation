@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 
 
@@ -40,6 +42,24 @@ class BaseStorage(ABC):
         """Iterate over all keys in storage."""
         ...
 
+    def get_and_touch(self, key: str) -> tuple[bytes, StorageEntryMetadata]:
+        """Retrieve a value together with its metadata, recording
+        this as an access for backends that track one (see
+        cache.protocols.HasLastAccessTime).
+
+        Default: two separate calls (get then get_metadata), with no
+        actual access-time bookkeeping - BaseStorage has no way to
+        know whether a subclass tracks access time at all. Override
+        in backends that do (DiskStorage, SqliteStorage) for a
+        tighter (backend-permitting, atomic) read plus real LRU
+        bookkeeping in a single operation.
+
+        Raises EntryNotFoundError if not found.
+        """
+        value = self.get(key)
+        metadata = self.get_metadata(key)
+        return value, metadata
+
     def cleanup(self, *, dry_run: bool = False) -> list[str]:
         """Perform backend-specific maintenance unrelated to entry validity.
 
@@ -56,6 +76,24 @@ class BaseStorage(ABC):
             dry_run, would be) cleaned up. Empty if nothing to do.
         """
         return []
+
+    def lock(self) -> AbstractContextManager[None]:
+        """Cross-process mutual exclusion for compound operations that
+        span multiple storage calls - currently just Cache.prune()'s
+        scan-decide-evict sequence when an eviction policy is set.
+
+        This is not (and isn't meant to be) taken around every single
+        get()/set()/delete(): those are already effectively atomic on
+        their own per backend. It's specifically for orchestration
+        that reads then acts across several calls, where two
+        processes could otherwise make conflicting decisions.
+
+        Default: no-op - backends without a concurrency story simply
+        don't protect this, same opt-in pattern as cleanup(). Override
+        in backends that can offer real mutual exclusion (see
+        DiskStorage, SqliteStorage).
+        """
+        return contextlib.nullcontext()
 
 
 class EntryNotFoundError(Exception):
