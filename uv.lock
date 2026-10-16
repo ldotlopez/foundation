@@ -285,7 +285,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
-    { name = "filelock" },
     { name = "platformdirs" },
     { name = "rich" },
 ]
@@ -310,7 +309,6 @@ dev = [
 requires-dist = [
     { name = "bs4", marker = "extra == 'scraping'", specifier = ">=0.0.2" },
     { name = "click" },
-    { name = "filelock" },
     { name = "html5lib", marker = "extra == 'scraping'" },
     { name = "markdownify", marker = "extra == 'scraping'", specifier = ">=1.2.3" },
     { name = "platformdirs" },
