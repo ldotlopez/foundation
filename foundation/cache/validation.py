@@ -35,5 +35,8 @@ class TTLValidator(Validator[HasModifiedTime]):
         Returns:
             True if the entry is still valid (not expired), False otherwise
         """
+        if not isinstance(metadata, HasModifiedTime):
+            raise TypeError("TTLValidator requires metadata with modified_at")
+
         delta = now_utc_ts() - metadata.modified_at
         return delta <= self.expiration_time

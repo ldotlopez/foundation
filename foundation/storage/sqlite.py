@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import logging
 import sqlite3
 from collections.abc import Iterator
@@ -123,11 +122,8 @@ class SqliteStorage(BaseStorage):
             key=key, modified_at=row[0], last_access_time=row[1], size=row[2]
         )
 
-    def get_and_touch(self, key: str) -> tuple[bytes, SqliteStorageEntryMetadata]:
-        """Read a value and record the access, atomically - a single
-        UPDATE ... RETURNING statement, protected by SQLite's own
-        locking against other connections.
-        """
+    def get_with_metadata(self, key: str) -> tuple[bytes, SqliteStorageEntryMetadata]:
+        """Read a value and record its access time in one SQL statement."""
         row = self._conn.execute(
             f"UPDATE {_TABLE} SET last_access_time = ? WHERE key = ? "
             "RETURNING value, modified_at, last_access_time, size",
@@ -161,25 +157,3 @@ class SqliteStorage(BaseStorage):
         instead of waiting on garbage collection.
         """
         self._conn.close()
-
-    @contextlib.contextmanager
-    def lock(self) -> Iterator[None]:
-        """Cross-process mutual exclusion via a real SQLite write
-        transaction. BEGIN IMMEDIATE acquires SQLite's reserved lock
-        immediately (rather than deferring until the first write),
-        so a concurrent connection attempting the same is blocked
-        for the duration - exactly the exclusion Cache.prune()'s
-        scan-decide-evict sequence needs.
-
-        isolation_level=None (autocommit) is temporarily overridden
-        by this explicit BEGIN/COMMIT pair - normal operations
-        outside this context manager are unaffected.
-        """
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-        except BaseException:
-            self._conn.execute("ROLLBACK")
-            raise
-        else:
-            self._conn.execute("COMMIT")

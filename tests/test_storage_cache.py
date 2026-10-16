@@ -9,6 +9,7 @@ from foundation.cache import (
     MissingKeyError,
     NullValidator,
     SizeEvictionPolicy,
+    TTLValidator,
     Validator,
 )
 from foundation.storage import (
@@ -29,10 +30,17 @@ class StorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             storage = DiskStorage(Path(temporary_directory))
             storage.set("first-key", b"value")
+            metadata_before = storage.get_metadata("first-key")
 
             self.assertEqual(storage.get("first-key"), b"value")
             self.assertIn("first-key", list(storage.iter()))
             self.assertEqual(storage.get_metadata("first-key").size, 5)
+            value, accessed_metadata = storage.get_with_metadata("first-key")
+            self.assertEqual(value, b"value")
+            self.assertGreaterEqual(
+                accessed_metadata.last_access_time,
+                metadata_before.last_access_time,
+            )
             with self.assertRaises(EntryNotFoundError):
                 storage.get("missing")
 
@@ -56,10 +64,14 @@ class StorageTests(unittest.TestCase):
             db_path = Path(temporary_directory) / "cache.sqlite3"
             storage = SqliteStorage(db_path)
             storage.set("key", b"value")
-            value, metadata = storage.get_and_touch("key")
+            metadata_before = storage.get_metadata("key")
+            value, metadata = storage.get_with_metadata("key")
 
             self.assertEqual(value, b"value")
             self.assertEqual(metadata.size, 5)
+            self.assertGreaterEqual(
+                metadata.last_access_time, metadata_before.last_access_time
+            )
             self.assertIn("key", list(storage.iter()))
             storage.close()
 
@@ -112,6 +124,70 @@ class CacheTests(unittest.TestCase):
             cache.set("second", b"two")
 
             self.assertEqual(len(list(cache.iter())), 1)
+
+    def test_eviction_policy_rejects_incompatible_metadata_at_runtime(self) -> None:
+        class StorageWithoutAccessTime(DiskStorage):
+            def get_metadata(self, key: str) -> StorageEntryMetadata:
+                return StorageEntryMetadata(key=key)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            cache = Cache(
+                storage=StorageWithoutAccessTime(Path(temporary_directory)),
+                eviction_policy=MaxEntriesEvictionPolicy(max_entries=1),
+            )
+            cache.set("key", b"value")
+
+            with self.assertRaisesRegex(TypeError, "last_access_time"):
+                cache.prune()
+
+        class StorageWithoutSize(DiskStorage):
+            def get_metadata(self, key: str) -> StorageEntryMetadata:
+                return StorageEntryMetadata(key=key)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            cache = Cache(
+                storage=StorageWithoutSize(Path(temporary_directory)),
+                eviction_policy=SizeEvictionPolicy(max_size_bytes=1),
+            )
+            cache.set("key", b"value")
+
+            with self.assertRaisesRegex(TypeError, "last_access_time and size"):
+                cache.prune()
+
+    def test_ttl_rejects_incompatible_metadata_at_runtime(self) -> None:
+        class StorageWithoutModificationTime(DiskStorage):
+            def get_metadata(self, key: str) -> StorageEntryMetadata:
+                return StorageEntryMetadata(key=key)
+
+            def get_with_metadata(self, key: str) -> tuple[bytes, StorageEntryMetadata]:
+                return self.get(key), self.get_metadata(key)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            cache = Cache(
+                storage=StorageWithoutModificationTime(Path(temporary_directory)),
+                validator=TTLValidator(expiration_time=60),
+            )
+            cache.set("key", b"value")
+
+            with self.assertRaisesRegex(TypeError, "modified_at"):
+                cache.get("key")
+
+    def test_cache_get_updates_lru_access_time(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            storage = SqliteStorage(Path(temporary_directory) / "cache.sqlite3")
+            cache = Cache(
+                storage=storage,
+                eviction_policy=MaxEntriesEvictionPolicy(max_entries=1),
+            )
+            cache.set("old", b"old")
+            cache.set("new", b"new")
+
+            self.assertEqual(cache.get("old"), b"old")
+            removed_entries = cache.prune()
+
+            self.assertEqual([entry.key for entry in removed_entries], ["new"])
+            self.assertEqual(list(cache.iter()), ["old"])
+            storage.close()
 
     def test_eviction_policies_select_lru_entries(self) -> None:
         class Entry:

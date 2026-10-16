@@ -37,8 +37,8 @@ serialization, for example with `foundation.jsonlib`. `DiskStorage` and
 
 | Backend | Persistence and layout | Metadata/access behavior |
 | --- | --- | --- |
-| `DiskStorage` | One file per key, sharded by the first two key characters beneath `base_dir`; defaults to a temporary directory | Uses filesystem timestamps and size; `get_and_touch()` explicitly updates access time |
-| `SqliteStorage` | SQLite table with one row per key; an omitted `db_path` selects an in-memory database | Stores modification time, last-access time, and byte size; `get_and_touch()` updates access time in one SQL statement |
+| `DiskStorage` | One file per key, sharded by the first two key characters beneath `base_dir`; defaults to a temporary directory | Uses filesystem timestamps and size; `get_with_metadata()` explicitly updates access time |
+| `SqliteStorage` | SQLite table with one row per key; an omitted `db_path` selects an in-memory database | Stores modification time, last-access time, and byte size; `get_with_metadata()` updates access time in one SQL statement |
 
 Disk keys are validated as safe single path components. SQLite keys are SQL
 values and are stored as-is. `SqliteStorage.close()` releases its connection;
@@ -56,6 +56,8 @@ than depending directly on a particular backend's metadata class.
 - `get()` reads the value and metadata together, touching access time where
   the backend supports it. If validation fails, it deletes the entry and raises
   `ExpiredKeyError`.
+- Validators and eviction policies use structural metadata protocols and check
+  compatibility when they receive an entry.
 - `prune()` scans for invalid entries and then applies the optional eviction
   policy to valid entries. It returns metadata for entries removed or selected
   for removal during a dry run.
@@ -67,12 +69,10 @@ than depending directly on a particular backend's metadata class.
   tracking is meaningful for reads through `Cache.get()`; reads directly
   through a storage backend bypass it.
 
-The cache's ordinary `get`, `set`, and `delete` sequences are not generally
-protected against concurrent access. The disk and SQLite backends implement
-`lock()` for the scan/decide/evict portion of pruning, but that does not make
-all cache operations thread-safe or provide a general transaction across
-multiple operations. `DiskStorage` uses a `filelock` lock file; `SqliteStorage`
-uses `BEGIN IMMEDIATE`.
+Pruning is best-effort and is not synchronized with concurrent cache operations
+or other processes using the same storage. Storage provides no cache-eviction
+locking or transaction guarantees. Backend maintenance such as removing empty
+disk shard directories remains separate from cache pruning.
 
 `UserCache` is a specialization that derives a per-user cache directory via
 `platformdirs`, requests owner-only directory permissions, and uses
@@ -139,7 +139,7 @@ Click logging flags.
 
 ## Packaging and dependencies
 
-The package targets Python 3.13+. Core dependencies are `click`, `filelock`,
+The package targets Python 3.13+. Core dependencies are `click`,
 `platformdirs`, and `rich`, used by the CLI/logging and storage/cache modules.
 The `scraping` optional dependency group declares `bs4`, `html5lib`,
 `markdownify`, `readability-lxml`, and `trafilatura`; `html5lib` is the parser

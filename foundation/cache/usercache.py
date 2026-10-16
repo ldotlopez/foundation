@@ -21,12 +21,8 @@ class UserCache(Cache):
 
         cache = UserCache(app="foo", expiration_time=3600)
 
-    Note: like Cache in general, this assumes no concurrent threads
-    or processes mutate the same storage directory concurrently (see
-    Cache.get's docstring). A per-app user cache directory is exactly
-    the kind of location two independent invocations of the same
-    tool might share, so that assumption is worth being aware of
-    here in particular, even though it's not enforced yet.
+    Pruning is best-effort and is not synchronized with concurrent
+    processes using the same directory.
     """
 
     def __init__(

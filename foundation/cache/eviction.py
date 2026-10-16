@@ -23,6 +23,7 @@ class EvictionPolicy[M]:
     from Cache.set() every eviction_check_interval writes) - not from
     Cache.get(). A single read has no cheap way to know whether the
     whole cache is over budget.
+
     """
 
     @abstractmethod
@@ -39,7 +40,7 @@ class MaxEntriesEvictionPolicy(EvictionPolicy[HasLastAccessTime]):
     Ordering is by last_access_time - true LRU, based on when an
     entry was last read, not modified_at (when it was last written).
     This only stays meaningful for entries read via
-    Cache.get()/BaseStorage.get_and_touch(): an entry that's only
+    Cache.get()/BaseStorage.get_with_metadata(): an entry that's only
     ever set() and never read keeps last_access_time frozen at its
     write time, and reads that bypass Cache.get() (calling a
     storage backend's get() directly) don't update it either.
@@ -51,6 +52,11 @@ class MaxEntriesEvictionPolicy(EvictionPolicy[HasLastAccessTime]):
     def select_for_eviction(
         self, entries: list[HasLastAccessTime]
     ) -> list[HasLastAccessTime]:
+        if any(not isinstance(entry, HasLastAccessTime) for entry in entries):
+            raise TypeError(
+                "MaxEntriesEvictionPolicy requires metadata with last_access_time"
+            )
+
         overflow = len(entries) - self.max_entries
         if overflow <= 0:
             return []
@@ -74,6 +80,11 @@ class SizeEvictionPolicy(EvictionPolicy[HasLastAccessTimeAndSize]):
     def select_for_eviction(
         self, entries: list[HasLastAccessTimeAndSize]
     ) -> list[HasLastAccessTimeAndSize]:
+        if any(not isinstance(entry, HasLastAccessTimeAndSize) for entry in entries):
+            raise TypeError(
+                "SizeEvictionPolicy requires metadata with last_access_time and size"
+            )
+
         total_size = sum(e.size for e in entries)
         if total_size <= self.max_size_bytes:
             return []

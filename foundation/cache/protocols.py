@@ -43,12 +43,11 @@ class HasSize(Protocol):
     def size(self) -> int: ...
 
 
+@runtime_checkable
 class HasLastAccessTimeAndSize(HasLastAccessTime, HasSize, Protocol):
     """Structural intersection of HasLastAccessTime and HasSize.
 
     SizeEvictionPolicy needs both: an ordering to decide which entry
     to evict first (last_access_time), and a size to accumulate
-    against a byte budget. Not marked runtime_checkable - isinstance
-    checks against it aren't needed anywhere; it's used purely as a
-    parameter type.
+    against a byte budget.
     """

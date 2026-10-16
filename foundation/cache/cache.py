@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterator
 from typing import Any
 
@@ -14,20 +13,13 @@ from .eviction import EvictionPolicy
 from .exc import ExpiredKeyError, MissingKeyError
 from .validation import NullValidator, Validator
 
-LOGGER = logging.getLogger(__name__)
-
 
 class Cache:
     """Thin wrapper that combines storage, validation, and (optionally)
     cache-wide eviction.
 
-    Concurrency note (see BaseStorage.get_and_touch/lock docstrings):
-    this assumes no concurrent threads and no concurrent external
-    mutation of storage from another instance of this process, except
-    where noted otherwise - lock() gives prune()'s eviction step real
-    cross-process mutual exclusion where a backend supports it, but
-    ordinary get()/set()/delete() calls are not otherwise protected
-    against a second concurrent writer.
+    Pruning is best-effort and is not synchronized with concurrent cache
+    operations or other processes using the same storage.
     """
 
     def __init__(
@@ -74,14 +66,11 @@ class Cache:
 
     def get(self, key: str) -> bytes:
         try:
-            value, entry = self.storage.get_and_touch(key)
+            value, entry = self.storage.get_with_metadata(key)
         except EntryNotFoundError as e:
             raise MissingKeyError(key) from e
 
         if not self.validator.is_valid(entry):
-            # Entry is invalid, delete it and raise an error. The
-            # access-time bookkeeping get_and_touch() just did is
-            # harmless here - the entry is being deleted regardless.
             self.storage.delete(key)
             raise ExpiredKeyError(key)
 
@@ -116,22 +105,12 @@ class Cache:
                 valid_entries.append(entry)
 
         if self.eviction_policy is not None:
-            # Cross-process mutual exclusion around the scan-decide-
-            # evict sequence specifically - see BaseStorage.lock().
-            # No-op on backends that don't override it.
-            with self.storage.lock():
-                to_evict = self.eviction_policy.select_for_eviction(valid_entries)
+            to_evict = self.eviction_policy.select_for_eviction(valid_entries)
 
-                for entry in to_evict:
-                    if not dry_run:
-                        self.storage.delete(entry.key)
+            for entry in to_evict:
+                if not dry_run:
+                    self.storage.delete(entry.key)
 
-                removed_entries.extend(to_evict)
-
-        # Storage-level maintenance (e.g. empty shard dirs), unrelated
-        # to entry validity but a natural time to sweep since prune()
-        # is already the "do some upkeep" entry point.
-        if removed_entries:
-            self.storage.cleanup(dry_run=dry_run)
+            removed_entries.extend(to_evict)
 
         return removed_entries

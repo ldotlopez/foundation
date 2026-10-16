@@ -16,7 +16,7 @@ The `scraping` extra enables the declared HTML/content dependencies:
 pip install ".[scraping]"
 ```
 
-The core dependencies (`click`, `filelock`, `platformdirs`, and `rich`) support
+The core dependencies (`click`, `platformdirs`, and `rich`) support
 the storage/cache, user-cache, and logging/CLI modules. The `scraping` extra
 installs the additional HTML/content libraries (`bs4`, `html5lib`,
 `markdownify`, `readability-lxml`, and `trafilatura`).
@@ -62,6 +62,10 @@ finally:
 accepts entries without expiration. `TTLValidator` checks age since modification;
 `UserCache` applies a TTL and stores data in the platform's per-user cache
 directory.
+
+Validators and eviction policies use structural metadata protocols and check
+compatibility when they receive an entry. Pruning is best-effort and is not
+synchronized across concurrent cache users.
 
 ## Package overview
 
