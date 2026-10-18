@@ -2,13 +2,34 @@
 
 ## Core Principles & Agentic Behavior
 
+- **Load Confirmation:** Begin the first reply of every conversation with the exact character `🚀` followed by a space, before any other text, to confirm this file was loaded. Do this only in the first reply, not in later ones.
 - **Refactor Before Implementing:** If a request violates core principles (SRP, KISS, DRY), rewrite the approach before coding, then briefly state what you changed and why.
 - **Search Boundaries First:** Search local directories before traversing the tree. Edit existing files over creating new ones.
 - **No Half-Baked Code:** Never leave `TODO` comments, placeholder logic, or mock returns in completed code.
 - **Explicit Dependencies:** When adding an approved package, run `uv add <package>` (updating `pyproject.toml`) in the same step.
 - **Communication Style:** Keep responses concise, direct, and non-verbose. Avoid filler, fluff, or excessive conversational preamble without becoming overly terse or abrupt, unless explicitly requested by the user.
+- **Honest Evaluation, No Edits:** When the user asks for an evaluation, opinion, review, critique, or similar (e.g., "what do you think?", "is this a good approach?"), give a candid assessment. Do not be a yes-man: state what is genuinely good and what is genuinely wrong, with concrete reasons, and say plainly if the idea is bad. In this mode, do not write code and do not create, modify, or delete any file; respond with analysis only. Act on it only after the user explicitly asks.
 
----
+## Project Context
+
+- If `README.md` exists in the repository root, read it at the start of the task for project context. If it does not exist, skip it silently; do not create it or mention its absence.
+- If `docs/ARCHITECTURE.md` exists, read it before adding modules or changing boundaries between layers.
+- If `docs/decisions/` exists, check it before proposing changes to an established approach; do not reverse a recorded decision without asking.
+
+### Documentation Maintenance
+
+The project documentation (`README.md`, `docs/ARCHITECTURE.md`, `docs/decisions/`) must stay in sync with the code. Never edit these files without the user's explicit permission.
+
+- **When to propose an update:** after completing a change that makes any of them inaccurate. Typical triggers:
+  - A module is added, removed, renamed, or changes responsibility (`ARCHITECTURE.md`).
+  - A CLI flag, requirement, or supported behavior changes, or a roadmap item is completed (`README.md`).
+  - A significant architectural decision is made, or an existing one is reversed or superseded (`docs/decisions/`).
+- **How to ask:** at the end of the task, state which files are affected and summarize the proposed edit in one or two lines per file. Then wait for an explicit yes. Do not edit first and ask afterwards.
+- **Scope of the edit:** once approved, change only what the code change made inaccurate. Do not rewrite or reformat unrelated sections.
+- **Decisions are append-only:** never rewrite an existing record in `docs/decisions/`. To reverse a decision, propose a new record that supersedes it, and propose changing the old record's status line only to `superseded by NNNN`.
+- **When unsure** whether a change warrants a documentation update, ask instead of skipping it silently.
+
+----
 
 ## File System Traversal & Search Rules
 
