@@ -1,4 +1,5 @@
 import hashlib
+import os
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -84,8 +85,7 @@ class _HashedFileStorage:
         Unreferenced objects are left by a crash between writing an object
         and indexing it. Objects modified within the last
         _ORPHAN_GRACE_SECONDS are kept, so cleanup is safe alongside set()
-        in other processes. With dry_run, directories emptied only by
-        removing objects are not reported.
+        in other processes.
         """
         referenced = self._index.object_ids()
         cutoff = now_utc_ts() - _ORPHAN_GRACE_SECONDS
@@ -99,7 +99,11 @@ class _HashedFileStorage:
                 removed.append(str(path))
                 if not dry_run:
                     path.unlink(missing_ok=True)
-        removed.extend(remove_empty_shard_dirs(self.object_dir, dry_run=dry_run))
+        removed.extend(
+            remove_empty_shard_dirs(
+                self.object_dir, dry_run=dry_run, removed_paths=set(removed)
+            )
+        )
         return removed
 
     def close(self) -> None:
@@ -175,12 +179,12 @@ class ValueHashStorage(_HashedFileStorage):
         return value
 
     def _write_object(self, key: str, path: Path, value: bytes) -> None:
-        if not path.exists():
-            atomic_write(path, value)
-        elif path.read_bytes() != value:
-            raise StorageCorruptionError(
-                key, f"backing object {path.name!r} has different content"
-            )
-        else:
-            # Reusing an unreferenced object: restart its cleanup grace period.
-            path.touch()
+        try:
+            if path.read_bytes() == value:
+                # Restart the cleanup grace period; raises if cleanup removed it.
+                os.utime(path)
+                return
+        except FileNotFoundError:
+            pass
+        # Missing or corrupt: content addressing makes rewriting it safe.
+        atomic_write(path, value)

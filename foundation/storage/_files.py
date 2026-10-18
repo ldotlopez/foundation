@@ -1,4 +1,5 @@
 import tempfile
+from collections.abc import Collection
 from os import stat_result
 from pathlib import Path
 
@@ -44,14 +45,20 @@ def stat_backing_file(key: str, path: Path) -> stat_result:
         ) from error
 
 
-def remove_empty_shard_dirs(root: Path, *, dry_run: bool) -> list[str]:
-    """Remove empty directories directly under root and return their paths."""
+def remove_empty_shard_dirs(
+    root: Path, *, dry_run: bool, removed_paths: Collection[str] = ()
+) -> list[str]:
+    """Remove empty directories directly under root and return their paths.
+
+    Children listed in removed_paths count as gone, so a dry run reports
+    directories that the real run would empty first.
+    """
     removed: list[str] = []
     for shard_dir in sorted(root.iterdir()):
         if not shard_dir.is_dir():
             continue
         try:
-            if any(shard_dir.iterdir()):
+            if any(str(child) not in removed_paths for child in shard_dir.iterdir()):
                 continue
             if not dry_run:
                 shard_dir.rmdir()

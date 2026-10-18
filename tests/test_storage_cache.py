@@ -220,12 +220,14 @@ class CacheTests(unittest.TestCase):
             cache.set("expired", b"old")
             cache.set("current", b"new")
 
-            dry_run_entries = cache.prune(dry_run=True)
-            self.assertEqual([entry.key for entry in dry_run_entries], ["expired"])
+            dry_run_report = cache.prune(dry_run=True)
+            self.assertEqual(
+                [entry.key for entry in dry_run_report.removed], ["expired"]
+            )
             self.assertCountEqual(list(cache.iter()), ["expired", "current"])
 
-            removed_entries = cache.prune()
-            self.assertEqual([entry.key for entry in removed_entries], ["expired"])
+            report = cache.prune()
+            self.assertEqual([entry.key for entry in report.removed], ["expired"])
             self.assertEqual(list(cache.iter()), ["current"])
 
     def test_prune_runs_storage_cleanup(self) -> None:
@@ -235,9 +237,9 @@ class CacheTests(unittest.TestCase):
             cache.set("expired", b"old")
             shard_dir = Path(temporary_directory) / "ex"
 
-            cache.prune(dry_run=True)
+            self.assertEqual(cache.prune(dry_run=True).cleaned, [])
             self.assertTrue(shard_dir.exists())
-            cache.prune()
+            self.assertEqual(cache.prune().cleaned, [str(shard_dir)])
             self.assertFalse(shard_dir.exists())
             storage.close()
 
@@ -253,9 +255,13 @@ class CacheTests(unittest.TestCase):
 
             with self.assertRaises(MissingKeyError):
                 cache.get("broken")
-            self.assertEqual(cache.prune(dry_run=True), [])
+            dry_run_report = cache.prune(dry_run=True)
+            self.assertEqual(
+                (dry_run_report.removed, dry_run_report.corrupt), ([], ["pruned"])
+            )
             self.assertIn("pruned", list(cache.iter()))
-            self.assertEqual(cache.prune(), [])
+            report = cache.prune()
+            self.assertEqual((report.removed, report.corrupt), ([], ["pruned"]))
             self.assertEqual(list(cache.iter()), ["healthy"])
             cache.close()
 
@@ -326,9 +332,9 @@ class CacheTests(unittest.TestCase):
             cache.set("new", b"new")
 
             self.assertEqual(cache.get("old"), b"old")
-            removed_entries = cache.prune()
+            report = cache.prune()
 
-            self.assertEqual([entry.key for entry in removed_entries], ["new"])
+            self.assertEqual([entry.key for entry in report.removed], ["new"])
             self.assertEqual(list(cache.iter()), ["old"])
             storage.close()
 

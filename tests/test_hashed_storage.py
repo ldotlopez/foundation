@@ -93,6 +93,18 @@ class HashedStorageTests(unittest.TestCase):
                 storage.get("key")
             storage.close()
 
+    def test_value_hash_storage_set_repairs_modified_blob(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            storage = ValueHashStorage(Path(temporary_directory))
+            storage.set("key", b"value")
+            object_path = storage._object_path(hashlib.sha256(b"value").hexdigest())
+            object_path.write_bytes(b"tampered")
+
+            storage.set("other", b"value")
+            self.assertEqual(storage.get("key"), b"value")
+            self.assertEqual(storage.get("other"), b"value")
+            storage.close()
+
     def test_cleanup_removes_unreferenced_objects(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             storage = ValueHashStorage(Path(temporary_directory))
@@ -104,7 +116,10 @@ class HashedStorageTests(unittest.TestCase):
 
             old = orphan_path.stat().st_mtime - 3600
             os.utime(orphan_path, (old, old))
-            self.assertEqual(storage.cleanup(dry_run=True), [str(orphan_path)])
+            self.assertEqual(
+                storage.cleanup(dry_run=True),
+                [str(orphan_path), str(orphan_path.parent)],
+            )
             self.assertTrue(orphan_path.exists())
             self.assertEqual(
                 storage.cleanup(), [str(orphan_path), str(orphan_path.parent)]

@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..storage import (
@@ -11,6 +12,18 @@ from ..storage import (
 from .eviction import EvictionPolicy
 from .exc import ExpiredKeyError, MissingKeyError
 from .validation import NullValidator, Validator
+
+
+@dataclass(slots=True)
+class PruneReport:
+    """What prune() removed, or would remove during a dry run."""
+
+    # Invalid entries, then entries evicted by the policy.
+    removed: list[StorageEntryMetadata] = field(default_factory=list)
+    # Keys of corrupt entries; they have no readable metadata.
+    corrupt: list[str] = field(default_factory=list)
+    # Paths the storage's cleanup() removed.
+    cleaned: list[str] = field(default_factory=list)
 
 
 class Cache:
@@ -88,15 +101,16 @@ class Cache:
     def iter(self) -> Iterator[str]:
         return self.storage.iter()
 
-    def prune(self, *, dry_run: bool = False) -> list[StorageEntryMetadata]:
-        """Remove invalid entries according to validator, then (if an
-        eviction_policy is set) evict enough of the remaining valid
-        entries to satisfy it. Finally run the backend's cleanup().
+    def prune(self, *, dry_run: bool = False) -> PruneReport:
+        """Remove invalid and corrupt entries, then (if an eviction_policy
+        is set) evict enough of the remaining valid entries to satisfy it.
+        Finally run the backend's cleanup().
 
-        Corrupt entries are deleted too, but are not included in the
-        returned list since they have no readable metadata.
+        A dry run reports the same entries without deleting them. Its
+        cleanup report cannot include files that the entry deletions
+        would free.
         """
-        removed_entries: list[StorageEntryMetadata] = []
+        report = PruneReport()
         valid_entries: list[StorageEntryMetadata] = []
 
         for key in list(self.storage.iter()):
@@ -105,12 +119,13 @@ class Cache:
             except EntryNotFoundError:
                 continue
             except StorageCorruptionError:
+                report.corrupt.append(key)
                 if not dry_run:
                     self.storage.delete(key)
                 continue
 
             if not self.validator.is_valid(entry):
-                removed_entries.append(entry)
+                report.removed.append(entry)
 
                 if not dry_run:
                     self.storage.delete(key)
@@ -124,10 +139,10 @@ class Cache:
                 if not dry_run:
                     self.storage.delete(entry.key)
 
-            removed_entries.extend(to_evict)
+            report.removed.extend(to_evict)
 
-        self.storage.cleanup(dry_run=dry_run)
-        return removed_entries
+        report.cleaned = self.storage.cleanup(dry_run=dry_run)
+        return report
 
     def close(self) -> None:
         """Close the underlying storage."""
