@@ -7,6 +7,7 @@
 - **Search Boundaries First:** Search local directories before traversing the tree. Edit existing files over creating new ones.
 - **No Half-Baked Code:** Never leave `TODO` comments, placeholder logic, or mock returns in completed code.
 - **Explicit Dependencies:** When adding an approved package, run `uv add <package>` (updating `pyproject.toml`) in the same step.
+- **No Commit Attribution:** Do not add `Co-Authored-By` trailers or any other AI attribution to commit messages or pull request descriptions.
 - **Communication Style:** Keep responses concise, direct, and non-verbose. Avoid filler, fluff, or excessive conversational preamble without becoming overly terse or abrupt, unless explicitly requested by the user.
 - **Honest Evaluation, No Edits:** When the user asks for an evaluation, opinion, review, critique, or similar (e.g., "what do you think?", "is this a good approach?"), give a candid assessment. Do not be a yes-man: state what is genuinely good and what is genuinely wrong, with concrete reasons, and say plainly if the idea is bad. In this mode, do not write code and do not create, modify, or delete any file; respond with analysis only. Act on it only after the user explicitly asks.
 
@@ -154,9 +155,7 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = (
-        UniqueConstraint("email", name="uq_user_email"),
-    )
+    __table_args__ = (UniqueConstraint("email", name="uq_user_email"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str] = mapped_column(String(255), nullable=False)
