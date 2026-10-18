@@ -112,9 +112,12 @@ operation.
   policy to valid entries, then runs the backend's `cleanup()` with the same
   `dry_run`. It returns metadata for entries removed or selected for removal
   during a dry run; the cleanup report is not returned.
-- Setting an eviction policy does not enforce a hard limit on every write.
-  `Cache.set()` triggers pruning every `eviction_check_interval` writes;
-  callers may invoke `prune()` explicitly. With no policy, there is no
+- `prune()` is a manual operation; the application decides when to run it.
+  Setting an eviction policy does not enforce a hard limit on every write.
+  As a convenience for long-lived processes, `Cache.set()` also prunes every
+  `eviction_check_interval` writes. That counter is in memory per `Cache`
+  instance and resets with each process, so short-lived CLI runs may never
+  reach it and should call `prune()` themselves. With no policy, there is no
   capacity enforcement.
 - The built-in eviction policies use least-recently-accessed ordering. Access
   is recorded by `Cache.get()` and by the storage's `get()` and

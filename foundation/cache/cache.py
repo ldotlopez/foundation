@@ -17,8 +17,10 @@ class Cache:
     """Thin wrapper that combines storage, validation, and (optionally)
     cache-wide eviction.
 
-    Pruning is best-effort and is not synchronized with concurrent cache
-    operations or other processes using the same storage.
+    prune() is a manual operation: call it when the application decides,
+    e.g. once per run in a CLI tool. Pruning is best-effort and is not
+    synchronized with concurrent cache operations or other processes
+    using the same storage.
     """
 
     def __init__(
@@ -38,15 +40,12 @@ class Cache:
                 None means no capacity enforcement at all - the cache
                 can grow without bound.
             eviction_check_interval: When eviction_policy is set,
-                set() self-triggers a prune() (which runs the
-                eviction pass, plus ordinary TTL pruning as a side
-                effect) every this-many writes. Ignored if
-                eviction_policy is None. This is a best-effort,
-                amortized enforcement point, not a hard guarantee -
-                the cache can temporarily exceed its budget between
-                checks; it will never be checked at all unless
-                something writes to the cache or calls prune()
-                explicitly. Must be positive.
+                set() also calls prune() every this-many writes made
+                through this instance. The count is in memory and
+                starts at zero for each instance, so short-lived
+                processes may never reach it and must call prune()
+                themselves. Ignored if eviction_policy is None. Must
+                be positive.
         """
         if eviction_check_interval <= 0:
             raise ValueError(

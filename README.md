@@ -63,9 +63,12 @@ accepts entries without expiration. `TTLValidator` checks age since modification
 directory.
 
 Validators and eviction policies use structural metadata protocols and check
-compatibility when they receive an entry. Pruning is best-effort and is not
-synchronized across concurrent cache users; it also runs the storage's
-`cleanup()`. To clean up storage periodically without pruning, pass
+compatibility when they receive an entry. Pruning is a manual operation:
+call `cache.prune()` when it suits the application, for example once per run
+in a CLI tool. `Cache.set()` only prunes automatically after
+`eviction_check_interval` writes through the same instance, which short-lived
+processes rarely reach. Pruning is best-effort and is not synchronized across
+concurrent cache users; it also runs the storage's `cleanup()`. To clean up storage periodically without pruning, pass
 `cleanup_interval` (seconds) to any backend, for example
 `DiskStorage(path, cleanup_interval=86400)` cleans up at most once a day when
 opened.

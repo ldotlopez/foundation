@@ -178,6 +178,22 @@ class StorageTests(unittest.TestCase):
                         open_storage().close()
                     cleanup.assert_called_once()
 
+    def test_close_removes_owned_temporary_directory(self) -> None:
+        for storage_class in (DiskStorage, KeyHashStorage, ValueHashStorage):
+            with self.subTest(backend=storage_class.__name__):
+                storage = storage_class()
+                storage.set("key", b"value")
+                self.assertTrue(storage.base_dir.exists())
+                storage.close()
+                self.assertFalse(storage.base_dir.exists())
+
+    def test_close_keeps_caller_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            storage = DiskStorage(Path(temporary_directory))
+            storage.set("key", b"value")
+            storage.close()
+            self.assertTrue(Path(temporary_directory, "ke", "key").exists())
+
     def test_entry_not_found_error_message_names_the_key(self) -> None:
         self.assertEqual(str(EntryNotFoundError("key")), "key")
 

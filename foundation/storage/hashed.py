@@ -30,7 +30,12 @@ class _HashedFileStorage:
         object_dir: str,
         cleanup_interval: float | None,
     ) -> None:
-        self.base_dir = base_dir if base_dir is not None else Path(tempfile.mkdtemp())
+        # A store in a temporary directory owns it and removes it on close().
+        self._temporary_dir: tempfile.TemporaryDirectory[str] | None = None
+        if base_dir is None:
+            self._temporary_dir = tempfile.TemporaryDirectory()
+            base_dir = Path(self._temporary_dir.name)
+        self.base_dir = base_dir
         self.object_dir = self.base_dir / object_dir
         self.object_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_path = self.base_dir / index_name
@@ -98,7 +103,10 @@ class _HashedFileStorage:
         return removed
 
     def close(self) -> None:
+        """Close the index and remove the directory if it is temporary."""
         self._index.close()
+        if self._temporary_dir is not None:
+            self._temporary_dir.cleanup()
 
     def _object_id(self, key: str, value: bytes) -> str:
         raise NotImplementedError

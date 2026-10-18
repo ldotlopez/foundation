@@ -44,13 +44,19 @@ class DiskStorage:
         """Create disk-backed storage.
 
         Args:
-            base_dir: Root directory for entries. A temp dir if omitted.
+            base_dir: Root directory for entries. If omitted, a temporary
+                directory is used and removed by close().
             dir_mode: Exact permission bits (e.g. 0o700) for base_dir and
                 every shard directory created under it.
             cleanup_interval: If given, run cleanup() on open when at least
                 this many seconds passed since the last run.
         """
-        self.base_dir = base_dir if base_dir is not None else Path(tempfile.mkdtemp())
+        # A store in a temporary directory owns it and removes it on close().
+        self._temporary_dir: tempfile.TemporaryDirectory[str] | None = None
+        if base_dir is None:
+            self._temporary_dir = tempfile.TemporaryDirectory()
+            base_dir = Path(self._temporary_dir.name)
+        self.base_dir = base_dir
         self.dir_mode = dir_mode
         self._mkdir(self.base_dir)
         self._index = MetadataIndex(self.base_dir / "disk-metadata.sqlite3")
@@ -95,7 +101,10 @@ class DiskStorage:
         return remove_empty_shard_dirs(self.base_dir, dry_run=dry_run)
 
     def close(self) -> None:
+        """Close the index and remove the directory if it is temporary."""
         self._index.close()
+        if self._temporary_dir is not None:
+            self._temporary_dir.cleanup()
 
     def _path(self, key: str) -> Path:
         validate_path_component(key)
