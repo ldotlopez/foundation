@@ -65,14 +65,18 @@ directory.
 
 Validators and eviction policies use structural metadata protocols and check
 compatibility when they receive an entry. Pruning is best-effort and is not
-synchronized across concurrent cache users.
+synchronized across concurrent cache users; it also runs the storage's
+`cleanup()`. To clean up storage periodically without pruning, pass
+`cleanup_interval` (seconds) to any backend, for example
+`DiskStorage(path, cleanup_interval=86400)` cleans up at most once a day when
+opened.
 
 ## Package overview
 
 | Module | Purpose |
 | --- | --- |
 | `foundation.cache` | Cache facade, TTL validation, LRU eviction, and per-user cache |
-| `foundation.storage` | Abstract storage contract, filesystem backend, and SQLite backend |
+| `foundation.storage` | Storage protocol, file-backed (`DiskStorage`, `KeyHashStorage`, `ValueHashStorage`) and SQLite backends |
 | `foundation.plugin` | Lazy module/class loading and Protocol-aware plugin registration |
 | `foundation.loglib`, `foundation.clilib` | Python logging setup, Rich consoles, and reusable Click logging options |
 | `foundation.scrapelib` | HTML parsing, DOM cleanup, content extraction, and Markdown conversion |

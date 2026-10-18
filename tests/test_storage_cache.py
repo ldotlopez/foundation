@@ -1,8 +1,9 @@
-import sqlite3
 import tempfile
+import time
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from unittest import mock
 
 from foundation.cache import (
     Cache,
@@ -21,8 +22,10 @@ from foundation.storage import (
     HasLastAccessTime,
     HasModifiedTime,
     HasSize,
+    KeyHashStorage,
     SqliteStorage,
     StorageEntryMetadata,
+    ValueHashStorage,
 )
 
 
@@ -103,30 +106,80 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(list(reopened.iter()), [])
             reopened.close()
 
-    def test_sqlite_storage_adds_creation_time_to_existing_database(self) -> None:
+    def test_disk_storage_ignores_unindexed_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            db_path = Path(temporary_directory) / "legacy.sqlite3"
-            connection = sqlite3.connect(db_path)
-            connection.execute(
-                "CREATE TABLE entries ("
-                "key TEXT PRIMARY KEY, value BLOB NOT NULL, "
-                "modified_at REAL NOT NULL, last_access_time REAL NOT NULL, "
-                "size INTEGER NOT NULL)"
-            )
-            connection.execute(
-                "INSERT INTO entries VALUES (?, ?, ?, ?, ?)",
-                ("legacy", b"value", 123.0, 124.0, 5),
-            )
-            connection.commit()
-            connection.close()
+            storage = DiskStorage(Path(temporary_directory))
+            storage.set("indexed", b"value")
+            (Path(temporary_directory) / "in" / "tmpleftover").write_bytes(b"junk")
+            (Path(temporary_directory) / "ex").mkdir()
+            (Path(temporary_directory) / "ex" / "external").write_bytes(b"junk")
 
-            storage = SqliteStorage(db_path)
-            metadata = storage.get_metadata("legacy")
-            self.assertEqual(metadata.created_at, 123.0)
-
-            storage.set("legacy", b"updated")
-            self.assertEqual(storage.get_metadata("legacy").created_at, 123.0)
+            self.assertEqual(list(storage.iter()), ["indexed"])
+            with self.assertRaises(EntryNotFoundError):
+                storage.get("external")
             storage.close()
+
+    def test_get_records_access_time_in_every_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base_dir = Path(temporary_directory)
+            backends = [
+                DiskStorage(base_dir / "disk"),
+                KeyHashStorage(base_dir / "key-hash"),
+                ValueHashStorage(base_dir / "value-hash"),
+                SqliteStorage(base_dir / "sqlite.sqlite3"),
+            ]
+            for storage in backends:
+                with self.subTest(backend=type(storage).__name__):
+                    storage.set("key", b"value")
+                    written_at = storage.get_metadata("key").last_access_time
+                    with mock.patch(
+                        f"{type(storage).__module__}.now_utc_ts",
+                        return_value=written_at + 60,
+                    ):
+                        self.assertEqual(storage.get("key"), b"value")
+                    self.assertEqual(
+                        storage.get_metadata("key").last_access_time, written_at + 60
+                    )
+                    storage.close()
+
+    def test_cleanup_interval_runs_cleanup_once_when_due(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base_dir = Path(temporary_directory)
+            factories = {
+                DiskStorage: lambda: DiskStorage(
+                    base_dir / "disk", cleanup_interval=60
+                ),
+                KeyHashStorage: lambda: KeyHashStorage(
+                    base_dir / "key-hash", cleanup_interval=60
+                ),
+                ValueHashStorage: lambda: ValueHashStorage(
+                    base_dir / "value-hash", cleanup_interval=60
+                ),
+                SqliteStorage: lambda: SqliteStorage(
+                    base_dir / "sqlite.sqlite3", cleanup_interval=60
+                ),
+            }
+            for storage_class, open_storage in factories.items():
+                with (
+                    self.subTest(backend=storage_class.__name__),
+                    mock.patch.object(
+                        storage_class, "cleanup", return_value=[]
+                    ) as cleanup,
+                ):
+                    open_storage().close()
+                    open_storage().close()
+                    cleanup.assert_not_called()
+
+                    with mock.patch(
+                        f"{storage_class.__module__}.now_utc_ts",
+                        return_value=time.time() + 120,
+                    ):
+                        open_storage().close()
+                        open_storage().close()
+                    cleanup.assert_called_once()
+
+    def test_entry_not_found_error_message_names_the_key(self) -> None:
+        self.assertEqual(str(EntryNotFoundError("key")), "key")
 
 
 class CacheTests(unittest.TestCase):
@@ -158,6 +211,19 @@ class CacheTests(unittest.TestCase):
             removed_entries = cache.prune()
             self.assertEqual([entry.key for entry in removed_entries], ["expired"])
             self.assertEqual(list(cache.iter()), ["current"])
+
+    def test_prune_runs_storage_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            storage = DiskStorage(Path(temporary_directory))
+            cache = Cache(storage=storage, validator=RejectKeyValidator())
+            cache.set("expired", b"old")
+            shard_dir = Path(temporary_directory) / "ex"
+
+            cache.prune(dry_run=True)
+            self.assertTrue(shard_dir.exists())
+            cache.prune()
+            self.assertFalse(shard_dir.exists())
+            storage.close()
 
     def test_set_periodically_applies_max_entries_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

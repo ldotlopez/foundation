@@ -25,8 +25,10 @@ foundation/
 
 The cache is composed from three roles:
 
-1. **`Cache`** exposes `set`, `get`, `delete`, `iter`, and `prune`.
-2. **`BaseStorage`** defines byte storage and metadata operations.
+1. **`Cache`** exposes `set`, `get`, `delete`, `iter`, and `prune`; `prune`
+   also runs the backend's `cleanup()`.
+2. **`BaseStorage`** is a `Protocol` defining byte storage, metadata,
+   `cleanup()`, and `close()` operations.
 3. **`Validator`** decides whether one entry is still valid; an optional
    **`EvictionPolicy`** selects entries to remove from the valid population
    when cache-wide limits are exceeded.
@@ -37,17 +39,17 @@ implement the same byte key-value contract:
 
 | Backend | Persistence and layout | Metadata/access behavior |
 | --- | --- | --- |
-| `DiskStorage` | One file per safe key, sharded by the first two key characters, plus a SQLite metadata sidecar beneath `base_dir` | Records creation, modification, access times, and logical size; reads through `get_with_metadata()` explicitly update access time |
+| `DiskStorage` | One file per safe key, sharded by the first two key characters, plus a SQLite metadata sidecar beneath `base_dir` | Records creation, modification, access times, and logical size in the index, which is the source of truth; files without an index row are ignored |
 | `KeyHashStorage` | One file per SHA-256 key digest under `base_dir`, plus a SQLite key/metadata index | Preserves original keys in the index; supports arbitrary key strings |
 | `ValueHashStorage` | One file per SHA-256 value digest under `base_dir`, plus a SQLite key/metadata index | Deduplicates equal values; metadata and access times are per key |
-| `SqliteStorage` | SQLite table stores one value and metadata row per key; an omitted `db_path` selects an in-memory database | Stores creation, modification, last-access time, and logical byte size; `get_with_metadata()` updates access time in one SQL statement |
+| `SqliteStorage` | SQLite table stores one value and metadata row per key; an omitted `db_path` selects an in-memory database | Stores creation, modification, last-access time, and logical byte size; reads update access time in one SQL statement |
 
 `DiskStorage` keys are validated as safe single path components. The hashed
 file stores and SQLite accept keys as-is; the hashed stores use SHA-256 only
-for filenames and retain the original key in SQLite. `SqliteStorage.close()`
-releases its connection; the in-memory database loses its contents when that
-connection is closed. The file-backed stores open and close their SQLite
-metadata connection per storage instance; call `close()` when finished with them.
+for filenames and retain the original key in SQLite. Every backend implements
+`close()` to release its SQLite connection; call it when finished. The
+in-memory `SqliteStorage` database loses its contents when that connection is
+closed.
 
 `StorageEntryMetadata` is the minimal storage-owned protocol and requires only
 the original `key`. Optional metadata capabilities are represented separately
@@ -55,9 +57,9 @@ by `HasCreatedTime`, `HasModifiedTime`, `HasLastAccessTime`, and `HasSize`.
 Each backend returns its own metadata object and may expose any combination of
 those capabilities. The current built-in backends happen to expose all four:
 overwrites preserve `created_at` and refresh `modified_at`; reads through
-`get_with_metadata()` refresh `last_access_time`; `size` is logical value size.
-For legacy `DiskStorage` files without an index row, `created_at` is inferred
-from filesystem birth time where available, or inode change time otherwise.
+`get()` or `get_with_metadata()` refresh `last_access_time`, while
+`get_metadata()` is pure inspection and does not; `size` is logical value size.
+`get_with_metadata()` is the canonical read and `get()` wraps it.
 
 Cache validators and eviction policies declare the metadata capabilities they
 require. For example, `TTLValidator` requires `HasModifiedTime`, LRU entry
@@ -74,13 +76,26 @@ can leave an unindexed file; an interrupted key-hash overwrite can leave new
 content with old metadata because that store reuses the same key-derived path.
 In `ValueHashStorage`, deleting or replacing a key removes its old blob only
 after no remaining key references it. In the hashed stores, missing or
-digest-mismatched indexed content raises `StorageCorruptionError`. These stores
-do not provide concurrent-writer coordination or automatic orphan
-reconciliation.
+digest-mismatched indexed content raises `StorageCorruptionError`, as does
+missing indexed content in `DiskStorage`. These stores do not provide
+concurrent-writer coordination. `cleanup()` removes empty shard directories in
+every file-backed store; in the hashed stores it also removes object files no
+index row references (orphans and leftover temp files), but only once they
+are older than a five-minute grace period, so it is safe alongside `set()` in
+other processes. `DiskStorage.cleanup()` never removes unindexed
+files.
 
-`cleanup()` remains backend maintenance (such as removing empty shard
-directories), not cache pruning or content/metadata reconciliation.
-Reconciliation is deferred and, if introduced, should be an explicit
+Every backend accepts an opt-in `cleanup_interval` (seconds). Opening the store
+runs `cleanup()` when that many seconds have passed since the last run. The
+last run time lives in a single-row `cleanup_clock` table in the backend's
+SQLite database (the metadata index for file-backed stores), and one atomic
+`UPDATE` claims each run, so only one of several concurrent openers cleans up.
+A new clock starts at creation time, so a fresh store is not cleaned on its
+first open.
+
+`cleanup()` remains backend maintenance, not cache pruning. Beyond removing
+unreferenced hashed objects, it does not reconcile content with metadata;
+broader reconciliation is deferred and, if introduced, should be an explicit
 operation.
 
 ### Cache operations and limits
@@ -91,20 +106,20 @@ operation.
 - Validators and eviction policies consume the specific storage metadata
   capabilities they require.
 - `prune()` scans for invalid entries and then applies the optional eviction
-  policy to valid entries. It returns metadata for entries removed or selected
-  for removal during a dry run.
+  policy to valid entries, then runs the backend's `cleanup()` with the same
+  `dry_run`. It returns metadata for entries removed or selected for removal
+  during a dry run; the cleanup report is not returned.
 - Setting an eviction policy does not enforce a hard limit on every write.
   `Cache.set()` triggers pruning every `eviction_check_interval` writes;
   callers may invoke `prune()` explicitly. With no policy, there is no
   capacity enforcement.
 - The built-in eviction policies use least-recently-accessed ordering. Access
-  tracking is meaningful for reads through `Cache.get()`; reads directly
-  through a storage backend bypass it.
+  is recorded by `Cache.get()` and by the storage's `get()` and
+  `get_with_metadata()`; `get_metadata()` does not record an access.
 
 Pruning is best-effort and is not synchronized with concurrent cache operations
 or other processes using the same storage. Storage provides no cache-eviction
-locking or transaction guarantees. Backend maintenance such as removing empty
-disk shard directories remains separate from cache pruning.
+locking or transaction guarantees.
 
 `UserCache` is a specialization that derives a per-user cache directory via
 `platformdirs`, requests owner-only directory permissions, and uses

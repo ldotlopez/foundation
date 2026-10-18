@@ -1,174 +1,162 @@
-from __future__ import annotations
-
-import errno
 import hashlib
-import os
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
 from ..dtlib import now_utc_ts
-from . import (
-    BaseStorage,
-    EntryNotFoundError,
-    StorageCorruptionError,
-    StorageEntryMetadata,
-)
-from ._index import _MetadataIndex
+from ._base import EntryNotFoundError, StorageCorruptionError, StorageEntryMetadata
+from ._files import atomic_write, read_backing_file, remove_empty_shard_dirs
+from ._index import IndexedMetadata, MetadataIndex
+
+# Unindexed objects younger than this may belong to an in-flight set().
+_ORPHAN_GRACE_SECONDS = 300.0
 
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _atomic_write(path: Path, value: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as temporary:
-            temporary.write(value)
-            temporary_path = Path(temporary.name)
-        os.replace(temporary_path, path)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+class _HashedFileStorage:
+    """File storage addressed by SHA-256 object ids, indexed in SQLite.
 
+    Objects live at ``<object_dir>/<id[:2]>/<id>``. Subclasses decide what
+    is hashed by overriding _object_id().
+    """
 
-class _HashedFileStorage(BaseStorage):
-    def __init__(self, base_dir: Path | None, index_name: str, object_dir: str) -> None:
-        if base_dir is None:
-            base_dir = Path(tempfile.mkdtemp())
-        self.base_dir = base_dir
-        self.object_dir = base_dir / object_dir
+    def __init__(
+        self,
+        base_dir: Path | None,
+        index_name: str,
+        object_dir: str,
+        cleanup_interval: float | None,
+    ) -> None:
+        self.base_dir = base_dir if base_dir is not None else Path(tempfile.mkdtemp())
+        self.object_dir = self.base_dir / object_dir
         self.object_dir.mkdir(parents=True, exist_ok=True)
-        self.metadata_path = base_dir / index_name
-        self._index = _MetadataIndex(self.metadata_path)
+        self.metadata_path = self.base_dir / index_name
+        self._index = MetadataIndex(self.metadata_path)
+        if cleanup_interval is not None and self._index.claim_cleanup(
+            cleanup_interval, now_utc_ts()
+        ):
+            self.cleanup()
+
+    def get(self, key: str) -> bytes:
+        value, _ = self.get_with_metadata(key)
+        return value
+
+    def set(self, key: str, value: bytes) -> None:
+        object_id = self._object_id(key, value)
+        path = self._object_path(object_id)
+        path.parent.mkdir(exist_ok=True)
+        self._write_object(key, path, value)
+        previous_id = self._index.upsert(key, object_id, len(value), now_utc_ts())
+        if previous_id is not None and previous_id != object_id:
+            self._release(previous_id)
+
+    def delete(self, key: str) -> None:
+        object_id = self._index.delete(key)
+        if object_id is not None:
+            self._release(object_id)
+
+    def get_metadata(self, key: str) -> StorageEntryMetadata:
+        _, metadata = self._locate(key)
+        return metadata
+
+    def get_with_metadata(self, key: str) -> tuple[bytes, StorageEntryMetadata]:
+        object_id, _ = self._locate(key)
+        value = self._read_object(key, object_id)
+        metadata = self._index.touch(key, now_utc_ts())
+        if metadata is None:
+            raise EntryNotFoundError(key)
+        return value, metadata
+
+    def iter(self) -> Iterator[str]:
+        yield from self._index.keys()
+
+    def cleanup(self, *, dry_run: bool = False) -> list[str]:
+        """Remove unreferenced objects, then empty shard directories.
+
+        Unreferenced objects are left by a crash between writing an object
+        and indexing it. Objects modified within the last
+        _ORPHAN_GRACE_SECONDS are kept, so cleanup is safe alongside set()
+        in other processes. With dry_run, directories emptied only by
+        removing objects are not reported.
+        """
+        referenced = self._index.object_ids()
+        cutoff = now_utc_ts() - _ORPHAN_GRACE_SECONDS
+        removed: list[str] = []
+        for path in sorted(self.object_dir.glob("*/*")):
+            if (
+                path.is_file()
+                and path.name not in referenced
+                and path.stat().st_mtime < cutoff
+            ):
+                removed.append(str(path))
+                if not dry_run:
+                    path.unlink(missing_ok=True)
+        removed.extend(remove_empty_shard_dirs(self.object_dir, dry_run=dry_run))
+        return removed
+
+    def close(self) -> None:
+        self._index.close()
+
+    def _object_id(self, key: str, value: bytes) -> str:
+        raise NotImplementedError
 
     def _object_path(self, object_id: str) -> Path:
         return self.object_dir / object_id[:2] / object_id
 
-    def _read_indexed(self, key: str) -> tuple[str, StorageEntryMetadata]:
+    def _locate(self, key: str) -> tuple[str, IndexedMetadata]:
         indexed = self._index.get(key)
         if indexed is None:
             raise EntryNotFoundError(key)
         return indexed
 
-    def get_metadata(self, key: str) -> StorageEntryMetadata:
-        _, metadata = self._read_indexed(key)
-        return metadata
-
-    def get_with_metadata(self, key: str) -> tuple[bytes, StorageEntryMetadata]:
-        object_id, _ = self._read_indexed(key)
-        value = self._read_object(key, object_id)
-        metadata = self._index.touch(key, now_utc_ts(), len(value))
-        if metadata is None:
-            raise EntryNotFoundError(key)
-        return value, metadata
-
-    def get(self, key: str) -> bytes:
-        object_id, _ = self._read_indexed(key)
-        return self._read_object(key, object_id)
-
-    def iter(self) -> Iterator[str]:
-        yield from self._index.iter_keys()
-
     def _read_object(self, key: str, object_id: str) -> bytes:
-        path = self._object_path(object_id)
-        try:
-            return path.read_bytes()
-        except FileNotFoundError as error:
-            raise StorageCorruptionError(
-                key, f"backing object {object_id!r} is missing"
-            ) from error
+        return read_backing_file(key, self._object_path(object_id))
 
-    def _remove_object(self, object_id: str) -> None:
-        path = self._object_path(object_id)
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            return
-        try:
-            path.parent.rmdir()
-        except OSError as error:
-            if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
-                raise
+    def _write_object(self, key: str, path: Path, value: bytes) -> None:
+        atomic_write(path, value)
 
-    def cleanup(self, *, dry_run: bool = False) -> list[str]:
-        removed: list[str] = []
-        shard_dirs = sorted(
-            (path for path in self.object_dir.rglob("*") if path.is_dir()),
-            key=lambda path: len(path.parts),
-            reverse=True,
-        )
-        for shard_dir in shard_dirs:
-            try:
-                next(shard_dir.iterdir())
-            except StopIteration:
-                removed.append(str(shard_dir))
-                if not dry_run:
-                    shard_dir.rmdir()
-            except FileNotFoundError:
-                continue
-        return removed
-
-    def close(self) -> None:
-        """Close the SQLite metadata index connection."""
-        self._index.close()
+    def _release(self, object_id: str) -> None:
+        if not self._index.is_referenced(object_id):
+            self._object_path(object_id).unlink(missing_ok=True)
 
 
 class KeyHashStorage(_HashedFileStorage):
-    """File-backed key-value storage addressed by SHA-256 hashes of keys.
+    """File storage addressed by the SHA-256 of each key.
 
-    The SQLite sidecar stores original keys and metadata; values remain
-    separate files under ``base_dir``. Keys can contain arbitrary characters.
+    Keys may contain any characters; the index keeps the original key.
     """
 
-    def __init__(self, base_dir: Path | None = None) -> None:
-        super().__init__(base_dir, "key-hash-metadata.sqlite3", "key-objects")
+    def __init__(
+        self, base_dir: Path | None = None, cleanup_interval: float | None = None
+    ) -> None:
+        """See DiskStorage for cleanup_interval."""
+        super().__init__(
+            base_dir, "key-hash-metadata.sqlite3", "key-objects", cleanup_interval
+        )
 
-    def set(self, key: str, value: bytes) -> None:
-        object_id = _sha256(key.encode("utf-8"))
-        existing_key = self._index.key_for_object(object_id)
-        if existing_key is not None and existing_key != key:
-            raise StorageCorruptionError(
-                key, f"SHA-256 key digest collides with key {existing_key!r}"
-            )
-        _atomic_write(self._object_path(object_id), value)
-        self._index.set(key, object_id, len(value), now_utc_ts())
-
-    def delete(self, key: str) -> None:
-        object_id = self._index.delete(key)
-        if object_id is not None:
-            self._remove_object(object_id)
+    def _object_id(self, key: str, value: bytes) -> str:
+        return _sha256(key.encode("utf-8"))
 
 
 class ValueHashStorage(_HashedFileStorage):
-    """File-backed key-value storage with SHA-256-addressed, deduplicated blobs."""
+    """File storage addressed by the SHA-256 of each value.
 
-    def __init__(self, base_dir: Path | None = None) -> None:
-        super().__init__(base_dir, "value-hash-metadata.sqlite3", "value-objects")
+    Equal values share one object; reads verify the object's digest.
+    """
 
-    def set(self, key: str, value: bytes) -> None:
-        object_id = _sha256(value)
-        object_path = self._object_path(object_id)
-        if object_path.exists():
-            existing_value = object_path.read_bytes()
-            if existing_value != value or _sha256(existing_value) != object_id:
-                raise StorageCorruptionError(
-                    key,
-                    f"backing object {object_id!r} has different content "
-                    "or failed digest verification",
-                )
-        else:
-            _atomic_write(object_path, value)
+    def __init__(
+        self, base_dir: Path | None = None, cleanup_interval: float | None = None
+    ) -> None:
+        """See DiskStorage for cleanup_interval."""
+        super().__init__(
+            base_dir, "value-hash-metadata.sqlite3", "value-objects", cleanup_interval
+        )
 
-        previous_object_id = self._index.set(key, object_id, len(value), now_utc_ts())
-        if (
-            previous_object_id is not None
-            and previous_object_id != object_id
-            and not self._index.object_is_referenced(previous_object_id)
-        ):
-            self._remove_object(previous_object_id)
+    def _object_id(self, key: str, value: bytes) -> str:
+        return _sha256(value)
 
     def _read_object(self, key: str, object_id: str) -> bytes:
         value = super()._read_object(key, object_id)
@@ -178,7 +166,13 @@ class ValueHashStorage(_HashedFileStorage):
             )
         return value
 
-    def delete(self, key: str) -> None:
-        object_id = self._index.delete(key)
-        if object_id is not None and not self._index.object_is_referenced(object_id):
-            self._remove_object(object_id)
+    def _write_object(self, key: str, path: Path, value: bytes) -> None:
+        if not path.exists():
+            atomic_write(path, value)
+        elif path.read_bytes() != value:
+            raise StorageCorruptionError(
+                key, f"backing object {path.name!r} has different content"
+            )
+        else:
+            # Reusing an unreferenced object: restart its cleanup grace period.
+            path.touch()

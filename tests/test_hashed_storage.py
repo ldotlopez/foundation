@@ -1,4 +1,5 @@
 import hashlib
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -90,6 +91,26 @@ class HashedStorageTests(unittest.TestCase):
 
             with self.assertRaises(StorageCorruptionError):
                 storage.get("key")
+            storage.close()
+
+    def test_cleanup_removes_unreferenced_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            storage = ValueHashStorage(Path(temporary_directory))
+            storage.set("key", b"value")
+            orphan_path = storage._object_path("ab" + "0" * 62)
+            orphan_path.parent.mkdir()
+            orphan_path.write_bytes(b"orphan")
+            self.assertEqual(storage.cleanup(dry_run=True), [])
+
+            old = orphan_path.stat().st_mtime - 3600
+            os.utime(orphan_path, (old, old))
+            self.assertEqual(storage.cleanup(dry_run=True), [str(orphan_path)])
+            self.assertTrue(orphan_path.exists())
+            self.assertEqual(
+                storage.cleanup(), [str(orphan_path), str(orphan_path.parent)]
+            )
+            self.assertFalse(orphan_path.parent.exists())
+            self.assertEqual(storage.get("key"), b"value")
             storage.close()
 
 

@@ -85,7 +85,7 @@ class Cache:
     def prune(self, *, dry_run: bool = False) -> list[StorageEntryMetadata]:
         """Remove invalid entries according to validator, then (if an
         eviction_policy is set) evict enough of the remaining valid
-        entries to satisfy it.
+        entries to satisfy it. Finally run the backend's cleanup().
         """
         removed_entries: list[StorageEntryMetadata] = []
         valid_entries: list[StorageEntryMetadata] = []
@@ -113,4 +113,5 @@ class Cache:
 
             removed_entries.extend(to_evict)
 
+        self.storage.cleanup(dry_run=dry_run)
         return removed_entries

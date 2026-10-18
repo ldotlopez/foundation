@@ -1,14 +1,13 @@
-from __future__ import annotations
-
-from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..dblib import SQLite3DB
+from ..dtlib import now_utc_ts
+from ._maintenance import claim_cleanup, create_cleanup_clock
 
 
-@dataclass(frozen=True)
-class _IndexedEntryMetadata:
+@dataclass(frozen=True, slots=True)
+class IndexedMetadata:
     key: str
     created_at: float
     modified_at: float
@@ -16,128 +15,106 @@ class _IndexedEntryMetadata:
     size: int
 
 
-class _MetadataIndex:
-    """SQLite index for file-backed storage content."""
+class MetadataIndex:
+    """SQLite index mapping keys to backing object ids and their metadata."""
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = SQLite3DB(db_path, use_dict_rows=True)
         with self._db.transition() as cursor:
             cursor.execute(
-                "CREATE TABLE IF NOT EXISTS entries ("
-                "key TEXT PRIMARY KEY, "
-                "object_id TEXT NOT NULL, "
-                "created_at REAL NOT NULL, "
-                "modified_at REAL NOT NULL, "
-                "last_access_time REAL NOT NULL, "
-                "size INTEGER NOT NULL"
-                ")"
+                """
+                CREATE TABLE IF NOT EXISTS entries (
+                    key TEXT PRIMARY KEY,
+                    object_id TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    modified_at REAL NOT NULL,
+                    last_access_time REAL NOT NULL,
+                    size INTEGER NOT NULL
+                )
+                """
             )
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS entries_object_id_idx ON entries(object_id)"
             )
+            create_cleanup_clock(cursor, now_utc_ts())
 
-    def get(self, key: str) -> tuple[str, _IndexedEntryMetadata] | None:
+    def get(self, key: str) -> tuple[str, IndexedMetadata] | None:
+        """Return the object id and metadata for key."""
         with self._db.transition() as cursor:
             row = cursor.execute(
-                "SELECT object_id, key, created_at, modified_at, "
-                "last_access_time, size FROM entries WHERE key = ?",
+                """
+                SELECT object_id, key, created_at, modified_at, last_access_time, size
+                FROM entries WHERE key = ?
+                """,
                 (key,),
             ).fetchone()
-            if row is None:
-                return None
+        if row is None:
+            return None
+        object_id = row.pop("object_id")
+        return object_id, IndexedMetadata(**row)
 
-            object_id = row.pop("object_id")
-            return object_id, _IndexedEntryMetadata(**row)
-
-    def set(self, key: str, object_id: str, size: int, now: float) -> str | None:
+    def upsert(self, key: str, object_id: str, size: int, now: float) -> str | None:
+        """Record a write of key and return the object id it replaced."""
         with self._db.transition() as cursor:
             previous = cursor.execute(
                 "SELECT object_id FROM entries WHERE key = ?", (key,)
             ).fetchone()
             cursor.execute(
-                "INSERT INTO entries "
-                "(key, object_id, created_at, modified_at, last_access_time, size) "
-                "VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET "
-                "object_id = excluded.object_id, "
-                "modified_at = excluded.modified_at, "
-                "last_access_time = excluded.last_access_time, "
-                "size = excluded.size",
+                """
+                INSERT INTO entries
+                    (key, object_id, created_at, modified_at, last_access_time, size)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    object_id = excluded.object_id,
+                    modified_at = excluded.modified_at,
+                    last_access_time = excluded.last_access_time,
+                    size = excluded.size
+                """,
                 (key, object_id, now, now, now, size),
             )
         return None if previous is None else previous["object_id"]
 
-    def register(
-        self,
-        key: str,
-        object_id: str,
-        created_at: float,
-        modified_at: float,
-        last_access_time: float,
-        size: int,
-    ) -> None:
-        with self._db.transition() as cursor:
-            cursor.execute(
-                "INSERT OR IGNORE INTO entries "
-                "(key, object_id, created_at, modified_at, last_access_time, size) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    key,
-                    object_id,
-                    created_at,
-                    modified_at,
-                    last_access_time,
-                    size,
-                ),
-            )
-
-    def touch(self, key: str, now: float, size: int) -> _IndexedEntryMetadata | None:
+    def touch(self, key: str, now: float) -> IndexedMetadata | None:
+        """Record an access to key and return its updated metadata."""
         with self._db.transition() as cursor:
             row = cursor.execute(
-                "UPDATE entries SET last_access_time = ?, size = ? "
-                "WHERE key = ? RETURNING created_at, modified_at",
-                (now, size, key),
+                """
+                UPDATE entries SET last_access_time = ? WHERE key = ?
+                RETURNING key, created_at, modified_at, last_access_time, size
+                """,
+                (now, key),
             ).fetchone()
-        if row is None:
-            return None
-        return _IndexedEntryMetadata(
-            key=key,
-            created_at=row["created_at"],
-            modified_at=row["modified_at"],
-            last_access_time=now,
-            size=size,
-        )
+        return None if row is None else IndexedMetadata(**row)
 
     def delete(self, key: str) -> str | None:
+        """Remove key and return the object id it referenced."""
         with self._db.transition() as cursor:
             row = cursor.execute(
                 "DELETE FROM entries WHERE key = ? RETURNING object_id", (key,)
             ).fetchone()
         return None if row is None else row["object_id"]
 
-    def iter_keys(self) -> Iterator[str]:
+    def keys(self) -> list[str]:
         with self._db.transition() as cursor:
-            keys = [
-                row["key"]
-                for row in cursor.execute("SELECT key FROM entries ORDER BY key")
-            ]
-        yield from keys
+            rows = cursor.execute("SELECT key FROM entries ORDER BY key").fetchall()
+        return [row["key"] for row in rows]
 
-    def object_is_referenced(self, object_id: str) -> bool:
+    def object_ids(self) -> set[str]:
+        with self._db.transition() as cursor:
+            rows = cursor.execute("SELECT DISTINCT object_id FROM entries").fetchall()
+        return {row["object_id"] for row in rows}
+
+    def is_referenced(self, object_id: str) -> bool:
         with self._db.transition() as cursor:
             row = cursor.execute(
                 "SELECT 1 FROM entries WHERE object_id = ? LIMIT 1", (object_id,)
             ).fetchone()
         return row is not None
 
-    def key_for_object(self, object_id: str) -> str | None:
+    def claim_cleanup(self, interval: float, now: float) -> bool:
         with self._db.transition() as cursor:
-            row = cursor.execute(
-                "SELECT key FROM entries WHERE object_id = ? LIMIT 1", (object_id,)
-            ).fetchone()
-        return None if row is None else row["key"]
+            return claim_cleanup(cursor, interval, now)
 
     def close(self) -> None:
         self._db.close()
