@@ -6,7 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from foundation import dblib, plugin
-from foundation.dblib import SQLite3DB, configure_connection
+from foundation.dblib import SQLite3DB
 from foundation.dtlib import timestamp_as_dt_aware
 from foundation.jsonlib import dump_json_compatible, load_json_compatible
 from foundation.scrapelib import (
@@ -124,18 +124,6 @@ class SQLite3DBTests(unittest.TestCase):
             self.assertEqual(database.db.execute("PRAGMA synchronous").fetchone(), (1,))
             self.assertEqual(database.db.execute("PRAGMA temp_store").fetchone(), (2,))
             database.close()
-
-    def test_configure_connection_applies_pragmas_to_foreign_connections(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            connection = sqlite3.connect(Path(temporary_directory) / "records.sqlite3")
-            configure_connection(connection)
-
-            self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone(), (1,))
-            self.assertEqual(
-                connection.execute("PRAGMA journal_mode").fetchone(), ("wal",)
-            )
-            self.assertEqual(connection.execute("PRAGMA temp_store").fetchone(), (2,))
-            connection.close()
 
     def test_transition_commits_and_rolls_back_while_propagating_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
