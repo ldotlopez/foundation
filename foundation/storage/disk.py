@@ -9,6 +9,7 @@ from ._base import EntryNotFoundError, validate_path_component
 from ._files import (
     atomic_write,
     read_backing_file,
+    remove_dir_if_empty,
     remove_empty_shard_dirs,
     stat_backing_file,
 )
@@ -72,13 +73,19 @@ class DiskStorage:
     def set(self, key: str, value: bytes) -> None:
         path = self._path(key)
         self._mkdir(path.parent)
-        atomic_write(path, value)
+        try:
+            atomic_write(path, value)
+        except FileNotFoundError:
+            # A concurrent delete() removed the emptied shard dir; recreate it.
+            self._mkdir(path.parent)
+            atomic_write(path, value)
         self._index.upsert(key, key, len(value), now_utc_ts())
 
     def delete(self, key: str) -> None:
         path = self._path(key)
         if self._index.delete(key) is not None:
             path.unlink(missing_ok=True)
+            remove_dir_if_empty(path.parent)
 
     def get_metadata(self, key: str) -> DiskStorageEntryMetadata:
         path, metadata = self._locate(key)
@@ -97,7 +104,7 @@ class DiskStorage:
         yield from self._index.keys()
 
     def cleanup(self, *, dry_run: bool = False) -> list[str]:
-        """Remove shard directories left empty by delete()."""
+        """Remove empty shard directories that delete() left behind."""
         return remove_empty_shard_dirs(self.base_dir, dry_run=dry_run)
 
     def close(self) -> None:

@@ -13,6 +13,7 @@ from foundation.cache import (
     NullValidator,
     SizeEvictionPolicy,
     TTLValidator,
+    UserCache,
     Validator,
 )
 from foundation.storage import (
@@ -26,6 +27,7 @@ from foundation.storage import (
     SqliteStorage,
     StorageEntryMetadata,
     ValueHashStorage,
+    disk,
 )
 
 
@@ -70,12 +72,15 @@ class StorageTests(unittest.TestCase):
                 storage.get("missing")
 
             storage.delete("first-key")
-            self.assertEqual(
-                storage.cleanup(dry_run=True), [str(Path(temporary_directory) / "fi")]
-            )
-            self.assertTrue((Path(temporary_directory) / "fi").exists())
-            storage.cleanup()
             self.assertFalse((Path(temporary_directory) / "fi").exists())
+
+            leftover_dir = Path(temporary_directory) / "le"
+            leftover_dir.mkdir()
+            self.assertEqual(storage.cleanup(dry_run=True), [str(leftover_dir)])
+            self.assertTrue(leftover_dir.exists())
+            storage.cleanup()
+            self.assertFalse(leftover_dir.exists())
+            storage.close()
 
     def test_disk_storage_rejects_unsafe_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -83,6 +88,7 @@ class StorageTests(unittest.TestCase):
             for key in ("", "../escape", "a/b", "a\\b", ".", ".."):
                 with self.subTest(key=key), self.assertRaises(ValueError):
                     storage.set(key, b"value")
+            storage.close()
 
     def test_sqlite_storage_round_trip_and_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -199,6 +205,23 @@ class StorageTests(unittest.TestCase):
 
 
 class CacheTests(unittest.TestCase):
+    def test_user_cache_keeps_entries_in_private_subdirectory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base_dir = Path(temporary_directory)
+            app_dir = base_dir / "ab"
+            app_dir.mkdir()
+            base_mode = base_dir.stat().st_mode
+
+            cache = UserCache(app="app", expiration_time=60, base_dir=base_dir)
+            cache.set("https://example.com/a?b=c", b"value")
+            self.assertEqual(cache.get("https://example.com/a?b=c"), b"value")
+            cache.prune()
+
+            self.assertTrue(app_dir.exists())
+            self.assertEqual(base_dir.stat().st_mode, base_mode)
+            self.assertEqual((base_dir / "entries").stat().st_mode & 0o777, 0o700)
+            cache.close()
+
     def test_get_maps_missing_key_and_removes_expired_key(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             cache = Cache(
@@ -212,6 +235,7 @@ class CacheTests(unittest.TestCase):
             with self.assertRaises(ExpiredKeyError):
                 cache.get("expired")
             self.assertNotIn("expired", list(cache.iter()))
+            cache.close()
 
     def test_prune_dry_run_then_removes_invalid_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -229,18 +253,63 @@ class CacheTests(unittest.TestCase):
             report = cache.prune()
             self.assertEqual([entry.key for entry in report.removed], ["expired"])
             self.assertEqual(list(cache.iter()), ["current"])
+            cache.close()
 
     def test_prune_runs_storage_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             storage = DiskStorage(Path(temporary_directory))
             cache = Cache(storage=storage, validator=RejectKeyValidator())
             cache.set("expired", b"old")
-            shard_dir = Path(temporary_directory) / "ex"
+            leftover_dir = Path(temporary_directory) / "le"
+            leftover_dir.mkdir()
 
-            self.assertEqual(cache.prune(dry_run=True).cleaned, [])
-            self.assertTrue(shard_dir.exists())
-            self.assertEqual(cache.prune().cleaned, [str(shard_dir)])
-            self.assertFalse(shard_dir.exists())
+            self.assertEqual(cache.prune(dry_run=True).cleaned, [str(leftover_dir)])
+            self.assertTrue(leftover_dir.exists())
+            self.assertEqual(cache.prune().cleaned, [str(leftover_dir)])
+            self.assertFalse(leftover_dir.exists())
+            self.assertFalse((Path(temporary_directory) / "ex").exists())
+            storage.close()
+
+    def test_delete_removes_emptied_shard_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base_dir = Path(temporary_directory)
+            for storage_class in (DiskStorage, KeyHashStorage, ValueHashStorage):
+                with self.subTest(storage=storage_class.__name__):
+                    storage_dir = base_dir / storage_class.__name__
+                    storage = storage_class(storage_dir)
+                    storage.set("key", b"value")
+                    storage.set("kez", b"value")
+                    shard_dirs = {
+                        path.parent
+                        for path in storage_dir.glob("*/**/*")
+                        if path.is_file() and path.suffix != ".sqlite3"
+                    }
+                    storage.delete("key")
+                    storage.delete("kez")
+                    self.assertTrue(shard_dirs)
+                    self.assertFalse(any(path.exists() for path in shard_dirs))
+                    storage.set("key", b"value")
+                    self.assertEqual(storage.get("key"), b"value")
+                    storage.close()
+
+    def test_set_recreates_shard_dir_removed_by_concurrent_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            storage = DiskStorage(Path(temporary_directory))
+            real_atomic_write = disk.atomic_write
+            removed_dirs: list[Path] = []
+
+            def write_after_concurrent_delete(path: Path, value: bytes) -> None:
+                if not removed_dirs:
+                    path.parent.rmdir()
+                    removed_dirs.append(path.parent)
+                real_atomic_write(path, value)
+
+            with mock.patch.object(
+                disk, "atomic_write", side_effect=write_after_concurrent_delete
+            ):
+                storage.set("key", b"value")
+            self.assertEqual(removed_dirs, [Path(temporary_directory) / "ke"])
+            self.assertEqual(storage.get("key"), b"value")
             storage.close()
 
     def test_corrupt_entry_is_a_miss_and_prune_removes_it(self) -> None:
@@ -295,6 +364,7 @@ class CacheTests(unittest.TestCase):
             cache.set("second", b"two")
 
             self.assertEqual(len(list(cache.iter())), 1)
+            cache.close()
 
     def test_storage_metadata_contract_is_key_only_and_capabilities_are_optional(
         self,

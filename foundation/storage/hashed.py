@@ -6,7 +6,12 @@ from pathlib import Path
 
 from ..dtlib import now_utc_ts
 from ._base import EntryNotFoundError, StorageCorruptionError, StorageEntryMetadata
-from ._files import atomic_write, read_backing_file, remove_empty_shard_dirs
+from ._files import (
+    atomic_write,
+    read_backing_file,
+    remove_dir_if_empty,
+    remove_empty_shard_dirs,
+)
 from ._index import IndexedMetadata, MetadataIndex
 
 # Unindexed objects younger than this may belong to an in-flight set().
@@ -54,7 +59,12 @@ class _HashedFileStorage:
         object_id = self._object_id(key, value)
         path = self._object_path(object_id)
         path.parent.mkdir(exist_ok=True)
-        self._write_object(key, path, value)
+        try:
+            self._write_object(key, path, value)
+        except FileNotFoundError:
+            # A concurrent delete() removed the emptied shard dir; recreate it.
+            path.parent.mkdir(exist_ok=True)
+            self._write_object(key, path, value)
         previous_id = self._index.upsert(key, object_id, len(value), now_utc_ts())
         if previous_id is not None and previous_id != object_id:
             self._release(previous_id)
@@ -132,7 +142,9 @@ class _HashedFileStorage:
 
     def _release(self, object_id: str) -> None:
         if not self._index.is_referenced(object_id):
-            self._object_path(object_id).unlink(missing_ok=True)
+            path = self._object_path(object_id)
+            path.unlink(missing_ok=True)
+            remove_dir_if_empty(path.parent)
 
 
 class KeyHashStorage(_HashedFileStorage):

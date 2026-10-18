@@ -45,6 +45,15 @@ def stat_backing_file(key: str, path: Path) -> stat_result:
         ) from error
 
 
+def remove_dir_if_empty(path: Path) -> None:
+    """Remove path if it is an empty directory."""
+    try:
+        path.rmdir()
+    except OSError:
+        # Not empty, or already removed by someone else.
+        return
+
+
 def remove_empty_shard_dirs(
     root: Path, *, dry_run: bool, removed_paths: Collection[str] = ()
 ) -> list[str]:

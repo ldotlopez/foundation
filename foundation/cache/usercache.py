@@ -2,25 +2,30 @@ from pathlib import Path
 
 import platformdirs
 
-from ..storage import DiskStorage, validate_path_component
+from ..storage import KeyHashStorage, validate_path_component
 from .cache import Cache
 from .validation import TTLValidator
 
 # Owner-only. UserCache lives in a per-user, per-app location by
 # default; nothing else on the machine should be able to read or
-# write it. Chosen here, in the cache layer, and passed down to
-# DiskStorage — DiskStorage itself has no opinion on permissions.
+# write it. Chosen here, in the cache layer; storage itself has no
+# opinion on permissions.
 _USER_CACHE_DIR_MODE = 0o700
 
 
 class UserCache(Cache):
-    """Disk-backed cache rooted at the platform's per-user cache
-    directory for `app`, with time-based expiration.
+    """Disk-backed cache in the platform's per-user cache directory for
+    `app`, with time-based expiration.
 
         cache = UserCache(app="foo", expiration_time=3600)
 
-    Pruning is best-effort and is not synchronized with concurrent
-    processes using the same directory.
+    Entries live in an owner-only `entries` subdirectory, so the app can
+    keep its own files beside them. Any string is a valid key.
+
+    Nothing prunes automatically: expired entries are removed only when
+    read or by prune(). Call prune() periodically, e.g. once per run, or
+    the directory grows without bound. Pruning is best-effort and is not
+    synchronized with concurrent processes using the same directory.
     """
 
     def __init__(
@@ -37,12 +42,19 @@ class UserCache(Cache):
             expiration_time: Seconds after which an entry is treated
                 as expired (see TTLValidator).
             base_dir: Overrides the platform-derived directory
-                entirely, e.g. for tests. When omitted, the platform
-                user cache directory for `app` is used.
+                entirely, e.g. for tests. Entries are stored in its
+                `entries` subdirectory; base_dir itself is not changed.
         """
         validate_path_component(app)
 
-        resolved_dir = base_dir or Path(platformdirs.user_cache_dir(app))
-        storage = DiskStorage(base_dir=resolved_dir, dir_mode=_USER_CACHE_DIR_MODE)
+        if base_dir is None:
+            base_dir = Path(platformdirs.user_cache_dir(app))
+        entries_dir = base_dir / "entries"
+        entries_dir.mkdir(parents=True, exist_ok=True)
+        # mkdir's mode is masked by the umask; chmod sets the exact bits.
+        entries_dir.chmod(_USER_CACHE_DIR_MODE)
 
-        super().__init__(storage=storage, validator=TTLValidator(expiration_time))
+        super().__init__(
+            storage=KeyHashStorage(entries_dir),
+            validator=TTLValidator(expiration_time),
+        )

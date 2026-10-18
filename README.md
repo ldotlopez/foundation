@@ -59,8 +59,10 @@ finally:
 `Cache.get()` raises `MissingKeyError` for a missing entry and
 `ExpiredKeyError` when its validator rejects an entry. The default validator
 accepts entries without expiration. `TTLValidator` checks age since modification;
-`UserCache` applies a TTL and stores data in the platform's per-user cache
-directory.
+`UserCache` applies a TTL and stores data in an `entries` subdirectory of the
+platform's per-user cache directory, accepting any string as a key. It never
+prunes on its own: call `cache.prune()` periodically, for example once per run,
+or expired entries accumulate.
 
 Validators and eviction policies use structural metadata protocols and check
 compatibility when they receive an entry. Pruning is a manual operation:

@@ -77,8 +77,11 @@ content with old metadata because that store reuses the same key-derived path.
 In `ValueHashStorage`, deleting or replacing a key removes its old blob only
 after no remaining key references it. In the hashed stores, missing or
 digest-mismatched indexed content raises `StorageCorruptionError`, as does
-missing indexed content in `DiskStorage`. These stores do not provide
-concurrent-writer coordination. `cleanup()` removes empty shard directories in
+missing indexed content in `DiskStorage`; writing the same value again to
+`ValueHashStorage` rewrites the damaged object. These stores do not provide
+concurrent-writer coordination. Deleting the last file in a shard directory
+removes the directory; `set()` recreates it once if a concurrent delete removes
+it mid-write. `cleanup()` removes empty shard directories left behind anyway in
 every file-backed store; in the hashed stores it also removes object files no
 index row references (orphans and leftover temp files), but only once they
 are older than a five-minute grace period, so it is safe alongside `set()` in
@@ -102,7 +105,7 @@ operation.
 
 - A cache miss is translated from `EntryNotFoundError` into `MissingKeyError`.
   A corrupt entry (`StorageCorruptionError`) is also a miss: `get()` deletes it
-  and raises `MissingKeyError`, and `prune()` deletes it without reporting it.
+  and raises `MissingKeyError`, and `prune()` deletes it and reports its key.
 - `Cache.close()` closes the underlying storage.
 - `get()` reads the value and metadata together, touching access time. If
   validation fails, it deletes the entry and raises `ExpiredKeyError`.
@@ -110,8 +113,10 @@ operation.
   capabilities they require.
 - `prune()` scans for invalid entries and then applies the optional eviction
   policy to valid entries, then runs the backend's `cleanup()` with the same
-  `dry_run`. It returns metadata for entries removed or selected for removal
-  during a dry run; the cleanup report is not returned.
+  `dry_run`. It returns a `PruneReport`: metadata for removed entries, keys of
+  corrupt entries, and the paths `cleanup()` removed. A dry run reports the
+  same entries without deleting them, but its cleanup paths cannot include
+  files that those deletions would free.
 - `prune()` is a manual operation; the application decides when to run it.
   Setting an eviction policy does not enforce a hard limit on every write.
   As a convenience for long-lived processes, `Cache.set()` also prunes every
@@ -128,8 +133,13 @@ or other processes using the same storage. Storage provides no cache-eviction
 locking or transaction guarantees.
 
 `UserCache` is a specialization that derives a per-user cache directory via
-`platformdirs`, requests owner-only directory permissions, and uses
-`TTLValidator`. Its `app` name must be a safe path component.
+`platformdirs` and uses `TTLValidator`. It stores entries in `KeyHashStorage`,
+so any string is a valid key, inside an `entries` subdirectory with owner-only
+permissions; the app directory itself, or a caller-provided `base_dir`, is left
+untouched, so cleanup never removes the app's own files or directories. Its
+`app` name must be a safe path component. It has no eviction policy and never
+prunes automatically; applications call `prune()` themselves, otherwise expired
+entries accumulate until they are read.
 
 ## Plugin loading
 
