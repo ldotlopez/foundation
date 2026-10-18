@@ -63,6 +63,53 @@ class UtilityTests(unittest.TestCase):
 
 
 class SQLite3DBTests(unittest.TestCase):
+    def test_dict_rows_can_be_enabled_for_the_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = SQLite3DB(
+                Path(temporary_directory) / "records.sqlite3", use_dict_rows=True
+            )
+            database.db.execute("CREATE TABLE records (value TEXT)")
+            database.db.execute("INSERT INTO records VALUES (?)", ("stored",))
+
+            self.assertEqual(
+                database.db.execute("SELECT value FROM records").fetchone(),
+                {"value": "stored"},
+            )
+            database.close()
+
+    def test_custom_row_factory_takes_precedence_over_dict_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = SQLite3DB(
+                Path(temporary_directory) / "records.sqlite3",
+                use_dict_rows=True,
+                row_factory=sqlite3.Row,
+            )
+            database.db.execute("CREATE TABLE records (value TEXT)")
+            database.db.execute("INSERT INTO records VALUES (?)", ("stored",))
+
+            row = database.db.execute("SELECT value FROM records").fetchone()
+            self.assertIsInstance(row, sqlite3.Row)
+            self.assertEqual(row["value"], "stored")
+            database.close()
+
+    def test_connection_applies_recommended_pragmas(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = SQLite3DB(Path(temporary_directory) / "records.sqlite3")
+
+            self.assertEqual(
+                database.db.execute("PRAGMA foreign_keys").fetchone(), (1,)
+            )
+            self.assertEqual(
+                database.db.execute("PRAGMA busy_timeout").fetchone(), (5000,)
+            )
+            self.assertTrue(database.db.autocommit)
+            self.assertEqual(
+                database.db.execute("PRAGMA journal_mode").fetchone(), ("wal",)
+            )
+            self.assertEqual(database.db.execute("PRAGMA synchronous").fetchone(), (1,))
+            self.assertEqual(database.db.execute("PRAGMA temp_store").fetchone(), (2,))
+            database.close()
+
     def test_transition_commits_and_rolls_back_while_propagating_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = SQLite3DB(Path(temporary_directory) / "records.sqlite3")
@@ -85,7 +132,7 @@ class SQLite3DBTests(unittest.TestCase):
                 [("committed",)],
             )
             self.assertFalse(database.db.in_transaction)
-            database.db.close()
+            database.close()
 
     def test_transition_rolls_back_sqlite_errors_from_body(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -102,7 +149,26 @@ class SQLite3DBTests(unittest.TestCase):
             self.assertEqual(
                 database.db.execute("SELECT value FROM records").fetchall(), []
             )
-            database.db.close()
+            database.close()
+
+    def test_nested_transition_does_not_rollback_outer_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = SQLite3DB(Path(temporary_directory) / "records.sqlite3")
+            database.db.execute("CREATE TABLE records (value TEXT)")
+
+            with database.transition() as cursor:
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "cannot be nested",
+                    database.transition().__enter__,
+                )
+                cursor.execute("INSERT INTO records VALUES (?)", ("committed",))
+
+            self.assertEqual(
+                database.db.execute("SELECT value FROM records").fetchall(),
+                [("committed",)],
+            )
+            database.close()
 
 
 if __name__ == "__main__":

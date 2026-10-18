@@ -93,5 +93,5 @@ contracts, and operational details.
 
 The project uses `uv`; its development dependency group is declared in
 `pyproject.toml`. Run `uv sync --group dev` to install the project and that
-group in a local environment. No test suite or test command is currently
-declared in the project configuration.
+group in a local environment. Run the tests with
+`uv run python -m unittest discover -s tests`.
