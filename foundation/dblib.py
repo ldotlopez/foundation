@@ -1,37 +1,68 @@
 import sqlite3
-from abc import abstractmethod
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+type RowFactory = Callable[[sqlite3.Cursor, tuple[Any, ...]], Any]
+
+
+def dict_row_factory(cursor: sqlite3.Cursor, row: tuple[Any, ...]) -> dict[str, Any]:
+    """Convert a SQLite row to a dictionary keyed by column name."""
+    columns = cursor.description
+    if columns is None:
+        raise RuntimeError("SQLite returned a row without column metadata")
+    return {column[0]: value for column, value in zip(columns, row, strict=True)}
+
 
 class SQLite3DB:
-    def __init__(self, db_path: Path) -> None:
-        self.db: sqlite3.Connection = sqlite3.Connection(db_path.as_posix())
-        # if self.sqlite3_db_row_factory != SQLite3DB.sqlite3_db_row_factory:
-        #     self.db.row_factory = self.sqlite3_db_row_factory
+    """Small SQLite connection wrapper with explicit transactions.
 
-    # Warning: don't change this without checking all the code that uses cursors
-    # for doing nested iterations over data
+    File-backed databases use WAL with NORMAL synchronous mode. This
+    supports concurrent readers and reduces write synchronization overhead;
+    NORMAL mode may lose recent committed transactions after power loss, but
+    keeps the database consistent. Use SQLite's backup API while open rather
+    than copying only the main database file.
+    """
+
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        use_dict_rows: bool = False,
+        row_factory: RowFactory | None = None,
+    ) -> None:
+        self.db = sqlite3.connect(db_path, timeout=5.0, autocommit=True)
+        if row_factory is not None:
+            self.db.row_factory = row_factory
+        elif use_dict_rows:
+            self.db.row_factory = dict_row_factory
+        self.db.execute("PRAGMA foreign_keys = ON")
+        self.db.execute("PRAGMA busy_timeout = 5000")
+        self.db.execute("PRAGMA journal_mode = WAL")
+        self.db.execute("PRAGMA synchronous = NORMAL")
+        self.db.execute("PRAGMA temp_store = MEMORY")
+
     @property
     def cursor(self) -> sqlite3.Cursor:
         return self.db.cursor()
 
     @contextmanager
     def transition(self) -> Generator[sqlite3.Cursor]:
+        if self.db.in_transaction:
+            raise RuntimeError("SQLite3DB transitions cannot be nested")
+
         c = self.cursor
-        c.execute("BEGIN")
         try:
+            c.execute("BEGIN")
             yield c
             c.execute("COMMIT")
         except BaseException:
             if self.db.in_transaction:
                 c.execute("ROLLBACK")
             raise
+        finally:
+            c.close()
 
-    @abstractmethod
-    def sqlite3_db_row_factory(
-        self, cursor: sqlite3.Cursor, row: tuple[Any, ...]
-    ) -> Any:
-        raise NotImplementedError()
+    def close(self) -> None:
+        self.db.close()
