@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from foundation import dblib, plugin
+from foundation import clilib, dblib, plugin
 from foundation.dblib import SQLite3DB
 from foundation.dtlib import timestamp_as_dt_aware
 from foundation.jsonlib import dump_json_compatible, load_json_compatible
@@ -65,7 +65,7 @@ class UtilityTests(unittest.TestCase):
 
 class ExportTests(unittest.TestCase):
     def test_public_names_are_exported_and_resolve(self) -> None:
-        for module in (dblib, plugin):
+        for module in (clilib, dblib, plugin):
             for name in module.__all__:
                 self.assertTrue(hasattr(module, name), f"{module.__name__}.{name}")
             defined_here = {

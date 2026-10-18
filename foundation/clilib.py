@@ -5,6 +5,16 @@ from rich.console import Console
 
 from .consts import DEFAULT_LOG_LEVEL
 
+__all__ = [
+    "RICH_DISABLED",
+    "RICH_ENABLED",
+    "RICH_LOG_HIDE_TIMES",
+    "click_logging_options",
+    "get_default_console",
+    "get_stderr_console",
+    "get_stdout_console",
+]
+
 _STDOUT_CONSOLE: Console | None = None
 _STDERR_CONSOLE: Console | None = None
 
@@ -55,11 +65,10 @@ def click_logging_options(f):
 
 
 def get_stdout_console() -> Console:
-    """Return a Console that writes to stdout, creating it on first use.
+    """Return the shared Console that writes to stdout, creating it on first use.
 
-    Note this forces terminal rendering (``force_terminal=True``) rather
-    than letting Rich auto-detect a non-TTY destination -- output will
-    include ANSI codes even when redirected to a file or pipe.
+    Rich auto-detects the destination: no ANSI codes when it is redirected
+    to a file or pipe.
     """
     global _STDOUT_CONSOLE
     if _STDOUT_CONSOLE is None:
@@ -74,11 +83,10 @@ get_default_console = get_stdout_console
 
 
 def get_stderr_console() -> Console:
-    """Return a Console that writes to stderr, creating it on first use.
+    """Return the shared Console that writes to stderr, creating it on first use.
 
-    Note this forces terminal rendering (``force_terminal=True``) rather
-    than letting Rich auto-detect a non-TTY destination -- output will
-    include ANSI codes even when redirected to a file or pipe.
+    Rich auto-detects the destination: no ANSI codes when it is redirected
+    to a file or pipe.
     """
     global _STDERR_CONSOLE
     if _STDERR_CONSOLE is None:
