@@ -92,7 +92,7 @@ storage used without a cache, claim a run from its persisted clock:
 | `foundation.jsonlib` | JSON encoding/decoding for datetimes and sets |
 | `foundation.dtlib` | UTC/local timestamps and timezone-aware datetime conversion |
 | `foundation.textlib` | Text slugification |
-| `foundation.dblib` | Minimal SQLite connection/transaction helper |
+| `foundation.dblib` | Minimal SQLite connection/transaction helper and shared connection settings |
 | `foundation.app` | Minimal `Application` example class |
 
 Only `Application` is re-exported from the top-level `foundation` package.

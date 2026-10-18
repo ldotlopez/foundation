@@ -205,7 +205,9 @@ Click logging flags.
   while preserving database consistency. Use SQLite's backup API while the
   database is open instead of copying only its main file. It is used by
   file-backed storage indexes and `SqliteStorage`, but is not itself a storage
-  backend.
+  backend. These settings live in `dblib.SQLITE_PRAGMAS`, and
+  `dblib.configure_connection()` applies them to connections opened outside
+  `SQLite3DB` (for example, by SQLAlchemy).
 - **`app.Application`** is a minimal example that stores a name and prints a
   greeting; it is not a lifecycle or dependency-management framework.
 

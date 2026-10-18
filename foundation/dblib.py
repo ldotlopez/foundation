@@ -4,7 +4,30 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+__all__ = [
+    "SQLITE_PRAGMAS",
+    "RowFactory",
+    "SQLite3DB",
+    "configure_connection",
+    "dict_row_factory",
+]
+
 type RowFactory = Callable[[sqlite3.Cursor, tuple[Any, ...]], Any]
+
+# Connection settings every foundation SQLite connection gets; see SQLite3DB.
+SQLITE_PRAGMAS = (
+    "foreign_keys = ON",
+    "busy_timeout = 5000",
+    "journal_mode = WAL",
+    "synchronous = NORMAL",
+    "temp_store = MEMORY",
+)
+
+
+def configure_connection(connection: sqlite3.Connection) -> None:
+    """Apply SQLITE_PRAGMAS to a connection opened elsewhere (e.g. by SQLAlchemy)."""
+    for pragma in SQLITE_PRAGMAS:
+        connection.execute(f"PRAGMA {pragma}")
 
 
 def dict_row_factory(cursor: sqlite3.Cursor, row: tuple[Any, ...]) -> dict[str, Any]:
@@ -37,11 +60,7 @@ class SQLite3DB:
             self.db.row_factory = row_factory
         elif use_dict_rows:
             self.db.row_factory = dict_row_factory
-        self.db.execute("PRAGMA foreign_keys = ON")
-        self.db.execute("PRAGMA busy_timeout = 5000")
-        self.db.execute("PRAGMA journal_mode = WAL")
-        self.db.execute("PRAGMA synchronous = NORMAL")
-        self.db.execute("PRAGMA temp_store = MEMORY")
+        configure_connection(self.db)
 
     @property
     def cursor(self) -> sqlite3.Cursor:

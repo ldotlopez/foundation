@@ -5,7 +5,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from foundation.dblib import SQLite3DB
+from foundation import dblib, plugin
+from foundation.dblib import SQLite3DB, configure_connection
 from foundation.dtlib import timestamp_as_dt_aware
 from foundation.jsonlib import dump_json_compatible, load_json_compatible
 from foundation.scrapelib import (
@@ -62,6 +63,20 @@ class UtilityTests(unittest.TestCase):
         self.assertIn("# Title", markdownify(article))
 
 
+class ExportTests(unittest.TestCase):
+    def test_public_names_are_exported_and_resolve(self) -> None:
+        for module in (dblib, plugin):
+            for name in module.__all__:
+                self.assertTrue(hasattr(module, name), f"{module.__name__}.{name}")
+            defined_here = {
+                name
+                for name, value in vars(module).items()
+                if not name.startswith("_")
+                and getattr(value, "__module__", None) == module.__name__
+            }
+            self.assertLessEqual(defined_here, set(module.__all__), module.__name__)
+
+
 class SQLite3DBTests(unittest.TestCase):
     def test_dict_rows_can_be_enabled_for_the_connection(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -109,6 +124,18 @@ class SQLite3DBTests(unittest.TestCase):
             self.assertEqual(database.db.execute("PRAGMA synchronous").fetchone(), (1,))
             self.assertEqual(database.db.execute("PRAGMA temp_store").fetchone(), (2,))
             database.close()
+
+    def test_configure_connection_applies_pragmas_to_foreign_connections(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            connection = sqlite3.connect(Path(temporary_directory) / "records.sqlite3")
+            configure_connection(connection)
+
+            self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone(), (1,))
+            self.assertEqual(
+                connection.execute("PRAGMA journal_mode").fetchone(), ("wal",)
+            )
+            self.assertEqual(connection.execute("PRAGMA temp_store").fetchone(), (2,))
+            connection.close()
 
     def test_transition_commits_and_rolls_back_while_propagating_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

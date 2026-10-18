@@ -38,6 +38,28 @@ from collections.abc import Callable, Iterable
 from types import ModuleType
 from typing import Any, NamedTuple
 
+__all__ = [
+    "AlreadyRegisteredError",
+    "BaseRegister",
+    "ClassLoader",
+    "EntryClassConstructionError",
+    "EntryClassInvalidError",
+    "EntryClassMissingError",
+    "EntryPointError",
+    "EntryPointMissingError",
+    "Lazy",
+    "LazyResolutionError",
+    "ModuleLoader",
+    "NotRegisteredError",
+    "ObjectNotFoundError",
+    "PluginError",
+    "PluginImportError",
+    "PluginNotFoundError",
+    "ProtocolConformanceError",
+    "Register",
+    "RegisteredObject",
+]
+
 
 def _resolve_attr(
     module: ModuleType, attr_name: str, missing_error: type[PluginError]
