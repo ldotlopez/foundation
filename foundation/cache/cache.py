@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections.abc import Iterator
 from typing import Any
 
@@ -7,6 +5,7 @@ from ..storage import (
     BaseStorage,
     DiskStorage,
     EntryNotFoundError,
+    StorageCorruptionError,
     StorageEntryMetadata,
 )
 from .eviction import EvictionPolicy
@@ -28,7 +27,7 @@ class Cache:
         validator: Validator[Any] | None = None,
         eviction_policy: EvictionPolicy[Any] | None = None,
         eviction_check_interval: int = 100,
-    ):
+    ) -> None:
         """
         Args:
             storage: Backend to use. DiskStorage() if omitted.
@@ -47,9 +46,13 @@ class Cache:
                 the cache can temporarily exceed its budget between
                 checks; it will never be checked at all unless
                 something writes to the cache or calls prune()
-                explicitly.
+                explicitly. Must be positive.
         """
-        self.storage = storage or DiskStorage()
+        if eviction_check_interval <= 0:
+            raise ValueError(
+                f"eviction_check_interval must be positive: {eviction_check_interval}"
+            )
+        self.storage = storage if storage is not None else DiskStorage()
         self.validator: Validator[Any] = validator or NullValidator()
         self.eviction_policy: EvictionPolicy[Any] | None = eviction_policy
         self.eviction_check_interval = eviction_check_interval
@@ -69,6 +72,10 @@ class Cache:
             value, entry = self.storage.get_with_metadata(key)
         except EntryNotFoundError as e:
             raise MissingKeyError(key) from e
+        except StorageCorruptionError as e:
+            # A corrupt entry is unrecoverable; for a cache that is a miss.
+            self.storage.delete(key)
+            raise MissingKeyError(key) from e
 
         if not self.validator.is_valid(entry):
             self.storage.delete(key)
@@ -86,6 +93,9 @@ class Cache:
         """Remove invalid entries according to validator, then (if an
         eviction_policy is set) evict enough of the remaining valid
         entries to satisfy it. Finally run the backend's cleanup().
+
+        Corrupt entries are deleted too, but are not included in the
+        returned list since they have no readable metadata.
         """
         removed_entries: list[StorageEntryMetadata] = []
         valid_entries: list[StorageEntryMetadata] = []
@@ -94,6 +104,10 @@ class Cache:
             try:
                 entry = self.storage.get_metadata(key)
             except EntryNotFoundError:
+                continue
+            except StorageCorruptionError:
+                if not dry_run:
+                    self.storage.delete(key)
                 continue
 
             if not self.validator.is_valid(entry):
@@ -115,3 +129,7 @@ class Cache:
 
         self.storage.cleanup(dry_run=dry_run)
         return removed_entries
+
+    def close(self) -> None:
+        """Close the underlying storage."""
+        self.storage.close()

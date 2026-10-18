@@ -101,6 +101,9 @@ operation.
 ### Cache operations and limits
 
 - A cache miss is translated from `EntryNotFoundError` into `MissingKeyError`.
+  A corrupt entry (`StorageCorruptionError`) is also a miss: `get()` deletes it
+  and raises `MissingKeyError`, and `prune()` deletes it without reporting it.
+- `Cache.close()` closes the underlying storage.
 - `get()` reads the value and metadata together, touching access time. If
   validation fails, it deletes the entry and raises `ExpiredKeyError`.
 - Validators and eviction policies consume the specific storage metadata

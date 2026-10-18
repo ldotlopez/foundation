@@ -1,17 +1,14 @@
-from __future__ import annotations
-
-from abc import abstractmethod
+from typing import Protocol
 
 from ..dtlib import now_utc_ts
 from ..storage import HasModifiedTime, StorageEntryMetadata
 
 
-class Validator[T]:
-    """Abstract base class for cache validators."""
+class Validator[T](Protocol):
+    """Decides whether a single cache entry is still valid."""
 
-    @abstractmethod
     def is_valid(self, metadata: T) -> bool:
-        """Check if a cache entry's metadata is valid."""
+        """Return True if the entry described by metadata is still valid."""
         ...
 
 
@@ -23,19 +20,14 @@ class NullValidator(Validator[StorageEntryMetadata]):
 
 
 class TTLValidator(Validator[HasModifiedTime]):
-    """Validator based on modification time metadata."""
+    """Rejects entries modified more than expiration_time seconds ago."""
 
-    def __init__(self, expiration_time: float):
-        self.expiration_time: float = expiration_time
+    def __init__(self, expiration_time: float) -> None:
+        if expiration_time <= 0:
+            raise ValueError(f"expiration_time must be positive: {expiration_time}")
+        self.expiration_time = expiration_time
 
     def is_valid(self, metadata: HasModifiedTime) -> bool:
-        """Check if a cache entry hasn't expired based on modification time.
-
-        Returns:
-            True if the entry is still valid (not expired), False otherwise
-        """
         if not isinstance(metadata, HasModifiedTime):
             raise TypeError("TTLValidator requires storage metadata with modified_at")
-
-        delta = now_utc_ts() - metadata.modified_at
-        return delta <= self.expiration_time
+        return now_utc_ts() - metadata.modified_at <= self.expiration_time

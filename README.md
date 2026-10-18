@@ -48,13 +48,12 @@ from pathlib import Path
 from foundation.cache import Cache
 from foundation.storage import SqliteStorage
 
-storage = SqliteStorage(Path("var/cache.sqlite3"))
-cache = Cache(storage=storage)
+cache = Cache(storage=SqliteStorage(Path("var/cache.sqlite3")))
 cache.set("greeting", b"hello")
 try:
     print(cache.get("greeting").decode("utf-8"))
 finally:
-    storage.close()
+    cache.close()
 ```
 
 `Cache.get()` raises `MissingKeyError` for a missing entry and

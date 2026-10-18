@@ -225,6 +225,42 @@ class CacheTests(unittest.TestCase):
             self.assertFalse(shard_dir.exists())
             storage.close()
 
+    def test_corrupt_entry_is_a_miss_and_prune_removes_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            storage = DiskStorage(Path(temporary_directory))
+            cache = Cache(storage=storage)
+            cache.set("broken", b"value")
+            cache.set("pruned", b"value")
+            cache.set("healthy", b"value")
+            (Path(temporary_directory) / "br" / "broken").unlink()
+            (Path(temporary_directory) / "pr" / "pruned").unlink()
+
+            with self.assertRaises(MissingKeyError):
+                cache.get("broken")
+            self.assertEqual(cache.prune(dry_run=True), [])
+            self.assertIn("pruned", list(cache.iter()))
+            self.assertEqual(cache.prune(), [])
+            self.assertEqual(list(cache.iter()), ["healthy"])
+            cache.close()
+
+    def test_close_closes_storage(self) -> None:
+        storage = mock.Mock()
+        Cache(storage=storage).close()
+        storage.close.assert_called_once_with()
+
+    def test_rejects_non_positive_limits(self) -> None:
+        constructors = {
+            "max_entries": lambda: MaxEntriesEvictionPolicy(max_entries=0),
+            "max_size_bytes": lambda: SizeEvictionPolicy(max_size_bytes=-1),
+            "expiration_time": lambda: TTLValidator(expiration_time=0),
+            "eviction_check_interval": lambda: Cache(
+                storage=mock.Mock(), eviction_check_interval=0
+            ),
+        }
+        for name, construct in constructors.items():
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, name):
+                construct()
+
     def test_set_periodically_applies_max_entries_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             cache = Cache(
