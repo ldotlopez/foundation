@@ -28,7 +28,7 @@ The cache is composed from three roles:
 1. **`Cache`** exposes `set`, `get`, `delete`, `iter`, and `prune`; `prune`
    also runs the backend's `cleanup()`.
 2. **`BaseStorage`** is a `Protocol` defining byte storage, metadata,
-   `cleanup()`, and `close()` operations.
+   `cleanup()`, `claim_maintenance()`, and `close()` operations.
 3. **`Validator`** decides whether one entry is still valid; an optional
    **`EvictionPolicy`** selects entries to remove from the valid population
    when cache-wide limits are exceeded.
@@ -42,7 +42,7 @@ implement the same byte key-value contract:
 | `DiskStorage` | One file per safe key, sharded by the first two key characters, plus a SQLite metadata sidecar beneath `base_dir` | Records creation, modification, access times, and logical size in the index, which is the source of truth; files without an index row are ignored |
 | `KeyHashStorage` | One file per SHA-256 key digest under `base_dir`, plus a SQLite key/metadata index | Preserves original keys in the index; supports arbitrary key strings |
 | `ValueHashStorage` | One file per SHA-256 value digest under `base_dir`, plus a SQLite key/metadata index | Deduplicates equal values; metadata and access times are per key |
-| `SqliteStorage` | SQLite table stores one value and metadata row per key; an omitted `db_path` selects an in-memory database | Stores creation, modification, last-access time, and logical byte size; reads update access time in one SQL statement |
+| `SqliteStorage` | SQLite table (through `dblib.SQLite3DB`, so WAL for files) stores one value and metadata row per key; an omitted `db_path` selects an in-memory database | Stores creation, modification, last-access time, and logical byte size; reads update access time in one SQL statement |
 
 `DiskStorage` keys are validated as safe single path components. The hashed
 file stores and SQLite accept keys as-is; the hashed stores use SHA-256 only
@@ -75,10 +75,12 @@ before metadata and delete metadata before content. An interrupted new write
 can leave an unindexed file; an interrupted key-hash overwrite can leave new
 content with old metadata because that store reuses the same key-derived path.
 In `ValueHashStorage`, deleting or replacing a key removes its old blob only
-after no remaining key references it. In the hashed stores, missing or
-digest-mismatched indexed content raises `StorageCorruptionError`, as does
-missing indexed content in `DiskStorage`; writing the same value again to
-`ValueHashStorage` rewrites the damaged object. These stores do not provide
+after no remaining key references it. Content that is missing, or fails
+`ValueHashStorage`'s digest check, cannot be recovered: the store deletes the
+entry when it notices and reports it as absent with `EntryNotFoundError`
+(`get_metadata()` notices only in `DiskStorage`, which stats the file). A
+damaged shared object goes once its last key is dropped, and writing the same
+value again to `ValueHashStorage` rewrites it. These stores do not provide
 concurrent-writer coordination. Deleting the last file in a shard directory
 removes the directory; `set()` recreates it once if a concurrent delete removes
 it mid-write. `cleanup()` removes empty shard directories left behind anyway in
@@ -88,42 +90,41 @@ are older than a five-minute grace period, so it is safe alongside `set()` in
 other processes. `DiskStorage.cleanup()` never removes unindexed
 files.
 
-Every backend accepts an opt-in `cleanup_interval` (seconds). Opening the store
-runs `cleanup()` when that many seconds have passed since the last run. The
-last run time lives in a single-row `cleanup_clock` table in the backend's
-SQLite database (the metadata index for file-backed stores), and one atomic
-`UPDATE` claims each run, so only one of several concurrent openers cleans up.
-A new clock starts at creation time, so a fresh store is not cleaned on its
-first open.
+Periodic maintenance has one scheduler. Every backend implements
+`claim_maintenance(interval)`, which returns true when at least `interval`
+seconds have passed since the last claimed run and records the new run. The
+time lives in a single-row `maintenance_clock` table in the backend's SQLite
+database (the metadata index for file-backed stores), and one atomic `UPDATE`
+claims each run, so only one of several concurrent callers gets it. A new
+clock starts at creation time, so a fresh store needs no maintenance. The
+caller performs the run: `Cache` prunes, and a storage user without a cache
+calls `cleanup()`.
 
 `cleanup()` remains backend maintenance, not cache pruning. Beyond removing
-unreferenced hashed objects, it does not reconcile content with metadata;
-broader reconciliation is deferred and, if introduced, should be an explicit
-operation.
+unreferenced hashed objects, it does not scan for entries with lost content;
+reads drop those as described above.
 
 ### Cache operations and limits
 
-- A cache miss is translated from `EntryNotFoundError` into `MissingKeyError`.
-  A corrupt entry (`StorageCorruptionError`) is also a miss: `get()` deletes it
-  and raises `MissingKeyError`, and `prune()` deletes it and reports its key.
-- `Cache.close()` closes the underlying storage.
+- A cache miss is translated from `EntryNotFoundError` into `MissingKeyError`;
+  entries whose content storage could not recover are misses too.
+- `Cache.close()` closes the underlying storage; `Cache` is also a context
+  manager that closes on exit without pruning.
 - `get()` reads the value and metadata together, touching access time. If
   validation fails, it deletes the entry and raises `ExpiredKeyError`.
 - Validators and eviction policies consume the specific storage metadata
   capabilities they require.
 - `prune()` scans for invalid entries and then applies the optional eviction
   policy to valid entries, then runs the backend's `cleanup()` with the same
-  `dry_run`. It returns a `PruneReport`: metadata for removed entries, keys of
-  corrupt entries, and the paths `cleanup()` removed. A dry run reports the
-  same entries without deleting them, but its cleanup paths cannot include
-  files that those deletions would free.
-- `prune()` is a manual operation; the application decides when to run it.
-  Setting an eviction policy does not enforce a hard limit on every write.
-  As a convenience for long-lived processes, `Cache.set()` also prunes every
-  `eviction_check_interval` writes. That counter is in memory per `Cache`
-  instance and resets with each process, so short-lived CLI runs may never
-  reach it and should call `prune()` themselves. With no policy, there is no
-  capacity enforcement.
+  `dry_run`. It returns a `PruneReport`: metadata for removed entries and the
+  paths `cleanup()` removed. A dry run reports the same entries without
+  deleting them, but its cleanup paths cannot include files that those
+  deletions would free; entries with lost content are still dropped, as they
+  hold no data.
+- `prune()` runs when the application calls it, or when the cache opens with
+  `prune_interval` set and `claim_maintenance(prune_interval)` succeeds.
+  Eviction policies apply only when pruning, so they do not enforce a hard
+  limit on every write. With no policy, there is no capacity enforcement.
 - The built-in eviction policies use least-recently-accessed ordering. Access
   is recorded by `Cache.get()` and by the storage's `get()` and
   `get_with_metadata()`; `get_metadata()` does not record an access.
@@ -137,9 +138,10 @@ locking or transaction guarantees.
 so any string is a valid key, inside an `entries` subdirectory with owner-only
 permissions; the app directory itself, or a caller-provided `base_dir`, is left
 untouched, so cleanup never removes the app's own files or directories. Its
-`app` name must be a safe path component. It has no eviction policy and never
-prunes automatically; applications call `prune()` themselves, otherwise expired
-entries accumulate until they are read.
+`app` name must be a safe path component. It has no eviction policy and is
+hands-off: it sets `prune_interval` to its `expiration_time`, so opening it
+prunes once per expiration period and entries written before one prune have
+expired by the next.
 
 ## Plugin loading
 
@@ -201,7 +203,8 @@ Click logging flags.
   coexistence; NORMAL can lose recent committed transactions on power loss
   while preserving database consistency. Use SQLite's backup API while the
   database is open instead of copying only its main file. It is used by
-  file-backed storage indexes, but is not itself a storage backend.
+  file-backed storage indexes and `SqliteStorage`, but is not itself a storage
+  backend.
 - **`app.Application`** is a minimal example that stores a name and prints a
   greeting; it is not a lifecycle or dependency-management framework.
 

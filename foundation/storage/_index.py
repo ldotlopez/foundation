@@ -3,7 +3,7 @@ from pathlib import Path
 
 from ..dblib import SQLite3DB
 from ..dtlib import now_utc_ts
-from ._maintenance import claim_cleanup, create_cleanup_clock
+from ._maintenance import claim_maintenance, create_maintenance_clock
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +37,7 @@ class MetadataIndex:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS entries_object_id_idx ON entries(object_id)"
             )
-            create_cleanup_clock(cursor, now_utc_ts())
+            create_maintenance_clock(cursor, now_utc_ts())
 
     def get(self, key: str) -> tuple[str, IndexedMetadata] | None:
         """Return the object id and metadata for key."""
@@ -112,9 +112,9 @@ class MetadataIndex:
             ).fetchone()
         return row is not None
 
-    def claim_cleanup(self, interval: float, now: float) -> bool:
+    def claim_maintenance(self, interval: float, now: float) -> bool:
         with self._db.transition() as cursor:
-            return claim_cleanup(cursor, interval, now)
+            return claim_maintenance(cursor, interval, now)
 
     def close(self) -> None:
         self._db.close()

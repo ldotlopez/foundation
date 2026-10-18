@@ -6,13 +6,7 @@ from pathlib import Path
 
 from ..dtlib import now_utc_ts
 from ._base import EntryNotFoundError, validate_path_component
-from ._files import (
-    atomic_write,
-    read_backing_file,
-    remove_dir_if_empty,
-    remove_empty_shard_dirs,
-    stat_backing_file,
-)
+from ._files import atomic_write, remove_dir_if_empty, remove_empty_shard_dirs
 from ._index import IndexedMetadata, MetadataIndex
 
 
@@ -40,7 +34,6 @@ class DiskStorage:
         self,
         base_dir: Path | None = None,
         dir_mode: int | None = None,
-        cleanup_interval: float | None = None,
     ) -> None:
         """Create disk-backed storage.
 
@@ -49,8 +42,6 @@ class DiskStorage:
                 directory is used and removed by close().
             dir_mode: Exact permission bits (e.g. 0o700) for base_dir and
                 every shard directory created under it.
-            cleanup_interval: If given, run cleanup() on open when at least
-                this many seconds passed since the last run.
         """
         # A store in a temporary directory owns it and removes it on close().
         self._temporary_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -61,10 +52,6 @@ class DiskStorage:
         self.dir_mode = dir_mode
         self._mkdir(self.base_dir)
         self._index = MetadataIndex(self.base_dir / "disk-metadata.sqlite3")
-        if cleanup_interval is not None and self._index.claim_cleanup(
-            cleanup_interval, now_utc_ts()
-        ):
-            self.cleanup()
 
     def get(self, key: str) -> bytes:
         value, _ = self.get_with_metadata(key)
@@ -89,12 +76,19 @@ class DiskStorage:
 
     def get_metadata(self, key: str) -> DiskStorageEntryMetadata:
         path, metadata = self._locate(key)
-        return self._disk_metadata(metadata, path, stat_backing_file(key, path))
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            raise self._forget(key) from None
+        return self._disk_metadata(metadata, path, stat)
 
     def get_with_metadata(self, key: str) -> tuple[bytes, DiskStorageEntryMetadata]:
         path, _ = self._locate(key)
-        value = read_backing_file(key, path)
-        stat = stat_backing_file(key, path)
+        try:
+            value = path.read_bytes()
+            stat = path.stat()
+        except FileNotFoundError:
+            raise self._forget(key) from None
         metadata = self._index.touch(key, now_utc_ts())
         if metadata is None:
             raise EntryNotFoundError(key)
@@ -106,6 +100,9 @@ class DiskStorage:
     def cleanup(self, *, dry_run: bool = False) -> list[str]:
         """Remove empty shard directories that delete() left behind."""
         return remove_empty_shard_dirs(self.base_dir, dry_run=dry_run)
+
+    def claim_maintenance(self, interval: float) -> bool:
+        return self._index.claim_maintenance(interval, now_utc_ts())
 
     def close(self) -> None:
         """Close the index and remove the directory if it is temporary."""
@@ -124,6 +121,11 @@ class DiskStorage:
             raise EntryNotFoundError(key)
         _, metadata = indexed
         return path, metadata
+
+    def _forget(self, key: str) -> EntryNotFoundError:
+        # A missing backing file cannot be recovered: drop its entry.
+        self.delete(key)
+        return EntryNotFoundError(key)
 
     def _mkdir(self, path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)

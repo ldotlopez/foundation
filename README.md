@@ -60,20 +60,24 @@ finally:
 `ExpiredKeyError` when its validator rejects an entry. The default validator
 accepts entries without expiration. `TTLValidator` checks age since modification;
 `UserCache` applies a TTL and stores data in an `entries` subdirectory of the
-platform's per-user cache directory, accepting any string as a key. It never
-prunes on its own: call `cache.prune()` periodically, for example once per run,
-or expired entries accumulate.
+platform's per-user cache directory, accepting any string as a key. It is
+hands-off: opening it prunes expired entries once per expiration period.
+
+```python
+from foundation.cache import UserCache
+
+with UserCache(app="myapp", expiration_time=3600) as cache:
+    cache.set("https://example.com/", b"<html>...</html>")
+```
 
 Validators and eviction policies use structural metadata protocols and check
-compatibility when they receive an entry. Pruning is a manual operation:
-call `cache.prune()` when it suits the application, for example once per run
-in a CLI tool. `Cache.set()` only prunes automatically after
-`eviction_check_interval` writes through the same instance, which short-lived
-processes rarely reach. Pruning is best-effort and is not synchronized across
-concurrent cache users; it also runs the storage's `cleanup()`. To clean up storage periodically without pruning, pass
-`cleanup_interval` (seconds) to any backend, for example
-`DiskStorage(path, cleanup_interval=86400)` cleans up at most once a day when
-opened.
+compatibility when they receive an entry. Call `cache.prune()` when it suits
+the application, or pass `prune_interval` (seconds) to prune on open once that
+much time has passed since the last prune, by any process. Eviction policies
+apply only when pruning. Pruning is best-effort and is not synchronized across
+concurrent cache users; it also runs the storage's `cleanup()`. To clean up a
+storage used without a cache, claim a run from its persisted clock:
+`if storage.claim_maintenance(86400): storage.cleanup()`.
 
 ## Package overview
 

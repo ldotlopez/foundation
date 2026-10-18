@@ -7,7 +7,6 @@ from pathlib import Path
 from foundation.storage import (
     EntryNotFoundError,
     KeyHashStorage,
-    StorageCorruptionError,
     ValueHashStorage,
 )
 
@@ -78,8 +77,9 @@ class HashedStorageTests(unittest.TestCase):
             storage.set("present", b"value")
             object_path = storage._object_path(hashlib.sha256(b"present").hexdigest())
             object_path.unlink()
-            with self.assertRaises(StorageCorruptionError):
+            with self.assertRaises(EntryNotFoundError):
                 storage.get("present")
+            self.assertEqual(list(storage.iter()), [])
             storage.close()
 
     def test_value_hash_storage_detects_modified_blob(self) -> None:
@@ -89,8 +89,10 @@ class HashedStorageTests(unittest.TestCase):
             object_path = storage._object_path(hashlib.sha256(b"value").hexdigest())
             object_path.write_bytes(b"tampered")
 
-            with self.assertRaises(StorageCorruptionError):
+            with self.assertRaises(EntryNotFoundError):
                 storage.get("key")
+            self.assertEqual(list(storage.iter()), [])
+            self.assertFalse(object_path.exists())
             storage.close()
 
     def test_value_hash_storage_set_repairs_modified_blob(self) -> None:

@@ -69,14 +69,17 @@ class BaseStorage(Protocol):
     def get_metadata(self, key: str) -> StorageEntryMetadata:
         """Return metadata for key without recording an access.
 
-        Raise EntryNotFoundError if absent.
+        Raise EntryNotFoundError if absent. An entry whose backing content
+        is found missing is deleted and reported as absent.
         """
         ...
 
     def get_with_metadata(self, key: str) -> tuple[bytes, StorageEntryMetadata]:
         """Return value and metadata for key, recording the access time.
 
-        Raise EntryNotFoundError if absent.
+        Raise EntryNotFoundError if absent. Backing content that is
+        missing or corrupt cannot be recovered, so its entry is deleted
+        and reported as absent.
         """
         ...
 
@@ -93,6 +96,15 @@ class BaseStorage(Protocol):
         """
         ...
 
+    def claim_maintenance(self, interval: float) -> bool:
+        """Claim a maintenance run if the last one is interval seconds old.
+
+        The last run time is persisted with the store and claimed
+        atomically, so of several processes only one gets each run. A new
+        store counts as just maintained. The caller performs the run.
+        """
+        ...
+
     def close(self) -> None:
         """Release the resources held by the backend."""
         ...
@@ -104,15 +116,6 @@ class EntryNotFoundError(Exception):
     def __init__(self, entry: str) -> None:
         self.entry = entry
         super().__init__(entry)
-
-
-class StorageCorruptionError(Exception):
-    """A stored entry has missing or invalid backing content."""
-
-    def __init__(self, entry: str, detail: str) -> None:
-        self.entry = entry
-        self.detail = detail
-        super().__init__(f"Storage entry {entry!r} is corrupt: {detail}")
 
 
 def validate_path_component(value: str) -> None:

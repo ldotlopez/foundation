@@ -22,9 +22,9 @@ class UserCache(Cache):
     Entries live in an owner-only `entries` subdirectory, so the app can
     keep its own files beside them. Any string is a valid key.
 
-    Nothing prunes automatically: expired entries are removed only when
-    read or by prune(). Call prune() periodically, e.g. once per run, or
-    the directory grows without bound. Pruning is best-effort and is not
+    Hands-off: opening the cache prunes it once expiration_time has
+    passed since the last prune, so entries written before one prune
+    have expired by the next. Pruning is best-effort and is not
     synchronized with concurrent processes using the same directory.
     """
 
@@ -57,4 +57,5 @@ class UserCache(Cache):
         super().__init__(
             storage=KeyHashStorage(entries_dir),
             validator=TTLValidator(expiration_time),
+            prune_interval=expiration_time,
         )

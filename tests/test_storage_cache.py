@@ -10,7 +10,6 @@ from foundation.cache import (
     ExpiredKeyError,
     MaxEntriesEvictionPolicy,
     MissingKeyError,
-    NullValidator,
     SizeEvictionPolicy,
     TTLValidator,
     UserCache,
@@ -148,41 +147,27 @@ class StorageTests(unittest.TestCase):
                     )
                     storage.close()
 
-    def test_cleanup_interval_runs_cleanup_once_when_due(self) -> None:
+    def test_claim_maintenance_grants_one_claim_per_interval(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             base_dir = Path(temporary_directory)
             factories = {
-                DiskStorage: lambda: DiskStorage(
-                    base_dir / "disk", cleanup_interval=60
-                ),
-                KeyHashStorage: lambda: KeyHashStorage(
-                    base_dir / "key-hash", cleanup_interval=60
-                ),
-                ValueHashStorage: lambda: ValueHashStorage(
-                    base_dir / "value-hash", cleanup_interval=60
-                ),
-                SqliteStorage: lambda: SqliteStorage(
-                    base_dir / "sqlite.sqlite3", cleanup_interval=60
-                ),
+                DiskStorage: lambda: DiskStorage(base_dir / "disk"),
+                KeyHashStorage: lambda: KeyHashStorage(base_dir / "key-hash"),
+                ValueHashStorage: lambda: ValueHashStorage(base_dir / "value-hash"),
+                SqliteStorage: lambda: SqliteStorage(base_dir / "sqlite.sqlite3"),
             }
             for storage_class, open_storage in factories.items():
-                with (
-                    self.subTest(backend=storage_class.__name__),
-                    mock.patch.object(
-                        storage_class, "cleanup", return_value=[]
-                    ) as cleanup,
-                ):
-                    open_storage().close()
-                    open_storage().close()
-                    cleanup.assert_not_called()
-
+                with self.subTest(backend=storage_class.__name__):
+                    first, second = open_storage(), open_storage()
+                    self.assertFalse(first.claim_maintenance(60))
                     with mock.patch(
                         f"{storage_class.__module__}.now_utc_ts",
                         return_value=time.time() + 120,
                     ):
-                        open_storage().close()
-                        open_storage().close()
-                    cleanup.assert_called_once()
+                        self.assertTrue(first.claim_maintenance(60))
+                        self.assertFalse(second.claim_maintenance(60))
+                    first.close()
+                    second.close()
 
     def test_close_removes_owned_temporary_directory(self) -> None:
         for storage_class in (DiskStorage, KeyHashStorage, ValueHashStorage):
@@ -221,6 +206,22 @@ class CacheTests(unittest.TestCase):
             self.assertEqual(base_dir.stat().st_mode, base_mode)
             self.assertEqual((base_dir / "entries").stat().st_mode & 0o777, 0o700)
             cache.close()
+
+    def test_user_cache_prunes_on_open_after_expiration_time(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base_dir = Path(temporary_directory)
+            with UserCache(app="app", expiration_time=60, base_dir=base_dir) as cache:
+                cache.set("key", b"value")
+
+            later = time.time() + 120
+            with (
+                mock.patch("foundation.storage.hashed.now_utc_ts", return_value=later),
+                mock.patch(
+                    "foundation.cache.validation.now_utc_ts", return_value=later
+                ),
+                UserCache(app="app", expiration_time=60, base_dir=base_dir) as cache,
+            ):
+                self.assertEqual(list(cache.iter()), [])
 
     def test_get_maps_missing_key_and_removes_expired_key(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -312,10 +313,9 @@ class CacheTests(unittest.TestCase):
             self.assertEqual(storage.get("key"), b"value")
             storage.close()
 
-    def test_corrupt_entry_is_a_miss_and_prune_removes_it(self) -> None:
+    def test_entry_with_missing_file_is_dropped_as_a_miss(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            storage = DiskStorage(Path(temporary_directory))
-            cache = Cache(storage=storage)
+            cache = Cache(storage=DiskStorage(Path(temporary_directory)))
             cache.set("broken", b"value")
             cache.set("pruned", b"value")
             cache.set("healthy", b"value")
@@ -324,13 +324,7 @@ class CacheTests(unittest.TestCase):
 
             with self.assertRaises(MissingKeyError):
                 cache.get("broken")
-            dry_run_report = cache.prune(dry_run=True)
-            self.assertEqual(
-                (dry_run_report.removed, dry_run_report.corrupt), ([], ["pruned"])
-            )
-            self.assertIn("pruned", list(cache.iter()))
-            report = cache.prune()
-            self.assertEqual((report.removed, report.corrupt), ([], ["pruned"]))
+            self.assertEqual(cache.prune().removed, [])
             self.assertEqual(list(cache.iter()), ["healthy"])
             cache.close()
 
@@ -339,32 +333,37 @@ class CacheTests(unittest.TestCase):
         Cache(storage=storage).close()
         storage.close.assert_called_once_with()
 
+        storage = mock.Mock()
+        with Cache(storage=storage) as cache:
+            self.assertIs(cache.storage, storage)
+        storage.close.assert_called_once_with()
+
+    def test_prune_interval_prunes_on_open_when_claimed(self) -> None:
+        for claimed in (False, True):
+            with (
+                self.subTest(claimed=claimed),
+                mock.patch.object(Cache, "prune") as prune,
+            ):
+                storage = mock.Mock()
+                storage.claim_maintenance.return_value = claimed
+                Cache(storage=storage, prune_interval=60)
+                storage.claim_maintenance.assert_called_once_with(60)
+                self.assertEqual(prune.called, claimed)
+
+        storage = mock.Mock()
+        Cache(storage=storage)
+        storage.claim_maintenance.assert_not_called()
+
     def test_rejects_non_positive_limits(self) -> None:
         constructors = {
             "max_entries": lambda: MaxEntriesEvictionPolicy(max_entries=0),
             "max_size_bytes": lambda: SizeEvictionPolicy(max_size_bytes=-1),
             "expiration_time": lambda: TTLValidator(expiration_time=0),
-            "eviction_check_interval": lambda: Cache(
-                storage=mock.Mock(), eviction_check_interval=0
-            ),
+            "prune_interval": lambda: Cache(storage=mock.Mock(), prune_interval=0),
         }
         for name, construct in constructors.items():
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, name):
                 construct()
-
-    def test_set_periodically_applies_max_entries_policy(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            cache = Cache(
-                storage=DiskStorage(Path(temporary_directory)),
-                validator=NullValidator(),
-                eviction_policy=MaxEntriesEvictionPolicy(max_entries=1),
-                eviction_check_interval=1,
-            )
-            cache.set("first", b"one")
-            cache.set("second", b"two")
-
-            self.assertEqual(len(list(cache.iter())), 1)
-            cache.close()
 
     def test_storage_metadata_contract_is_key_only_and_capabilities_are_optional(
         self,

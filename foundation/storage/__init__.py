@@ -6,7 +6,6 @@ from ._base import (
     HasLastAccessTimeAndSize,
     HasModifiedTime,
     HasSize,
-    StorageCorruptionError,
     StorageEntryMetadata,
     validate_path_component,
 )
@@ -27,7 +26,6 @@ __all__ = [
     "KeyHashStorage",
     "SqliteStorage",
     "SqliteStorageEntryMetadata",
-    "StorageCorruptionError",
     "StorageEntryMetadata",
     "ValueHashStorage",
     "validate_path_component",

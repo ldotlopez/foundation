@@ -5,10 +5,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from ..dtlib import now_utc_ts
-from ._base import EntryNotFoundError, StorageCorruptionError, StorageEntryMetadata
+from ._base import EntryNotFoundError, StorageEntryMetadata
 from ._files import (
     atomic_write,
-    read_backing_file,
     remove_dir_if_empty,
     remove_empty_shard_dirs,
 )
@@ -34,7 +33,6 @@ class _HashedFileStorage:
         base_dir: Path | None,
         index_name: str,
         object_dir: str,
-        cleanup_interval: float | None,
     ) -> None:
         # A store in a temporary directory owns it and removes it on close().
         self._temporary_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -46,10 +44,6 @@ class _HashedFileStorage:
         self.object_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_path = self.base_dir / index_name
         self._index = MetadataIndex(self.metadata_path)
-        if cleanup_interval is not None and self._index.claim_cleanup(
-            cleanup_interval, now_utc_ts()
-        ):
-            self.cleanup()
 
     def get(self, key: str) -> bytes:
         value, _ = self.get_with_metadata(key)
@@ -80,7 +74,12 @@ class _HashedFileStorage:
 
     def get_with_metadata(self, key: str) -> tuple[bytes, StorageEntryMetadata]:
         object_id, _ = self._locate(key)
-        value = self._read_object(key, object_id)
+        value = self._read_object(object_id)
+        if value is None:
+            # Missing or corrupt content cannot be recovered: drop the entry.
+            # A shared object goes once the last key referencing it is dropped.
+            self.delete(key)
+            raise EntryNotFoundError(key)
         metadata = self._index.touch(key, now_utc_ts())
         if metadata is None:
             raise EntryNotFoundError(key)
@@ -116,6 +115,9 @@ class _HashedFileStorage:
         )
         return removed
 
+    def claim_maintenance(self, interval: float) -> bool:
+        return self._index.claim_maintenance(interval, now_utc_ts())
+
     def close(self) -> None:
         """Close the index and remove the directory if it is temporary."""
         self._index.close()
@@ -134,8 +136,12 @@ class _HashedFileStorage:
             raise EntryNotFoundError(key)
         return indexed
 
-    def _read_object(self, key: str, object_id: str) -> bytes:
-        return read_backing_file(key, self._object_path(object_id))
+    def _read_object(self, object_id: str) -> bytes | None:
+        """Return the object's content, or None if it is missing or corrupt."""
+        try:
+            return self._object_path(object_id).read_bytes()
+        except FileNotFoundError:
+            return None
 
     def _write_object(self, key: str, path: Path, value: bytes) -> None:
         atomic_write(path, value)
@@ -153,13 +159,8 @@ class KeyHashStorage(_HashedFileStorage):
     Keys may contain any characters; the index keeps the original key.
     """
 
-    def __init__(
-        self, base_dir: Path | None = None, cleanup_interval: float | None = None
-    ) -> None:
-        """See DiskStorage for cleanup_interval."""
-        super().__init__(
-            base_dir, "key-hash-metadata.sqlite3", "key-objects", cleanup_interval
-        )
+    def __init__(self, base_dir: Path | None = None) -> None:
+        super().__init__(base_dir, "key-hash-metadata.sqlite3", "key-objects")
 
     def _object_id(self, key: str, value: bytes) -> str:
         return _sha256(key.encode("utf-8"))
@@ -171,23 +172,16 @@ class ValueHashStorage(_HashedFileStorage):
     Equal values share one object; reads verify the object's digest.
     """
 
-    def __init__(
-        self, base_dir: Path | None = None, cleanup_interval: float | None = None
-    ) -> None:
-        """See DiskStorage for cleanup_interval."""
-        super().__init__(
-            base_dir, "value-hash-metadata.sqlite3", "value-objects", cleanup_interval
-        )
+    def __init__(self, base_dir: Path | None = None) -> None:
+        super().__init__(base_dir, "value-hash-metadata.sqlite3", "value-objects")
 
     def _object_id(self, key: str, value: bytes) -> str:
         return _sha256(value)
 
-    def _read_object(self, key: str, object_id: str) -> bytes:
-        value = super()._read_object(key, object_id)
-        if _sha256(value) != object_id:
-            raise StorageCorruptionError(
-                key, f"backing object {object_id!r} failed digest verification"
-            )
+    def _read_object(self, object_id: str) -> bytes | None:
+        value = super()._read_object(object_id)
+        if value is None or _sha256(value) != object_id:
+            return None
         return value
 
     def _write_object(self, key: str, path: Path, value: bytes) -> None:
