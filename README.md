@@ -39,7 +39,7 @@ print(cache.get("greeting").decode("utf-8"))
 ```
 
 Disk storage shards entries into directories beneath its `base_dir`. If omitted,
-it creates a temporary directory. For a persistent SQLite-backed cache, pass
+it creates a temporary directory, which `close()` removes. For a persistent SQLite-backed cache, pass
 `SqliteStorage` instead:
 
 ```python
