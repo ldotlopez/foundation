@@ -61,12 +61,13 @@ finally:
 accepts entries without expiration. `TTLValidator` checks age since modification;
 `UserCache` applies a TTL and stores data in an `entries` subdirectory of the
 platform's per-user cache directory, accepting any string as a key. It is
-hands-off: opening it prunes expired entries once per expiration period.
+hands-off: entries expire after 24 hours unless `expiration_time` says
+otherwise, and opening it prunes expired entries once per expiration period.
 
 ```python
 from foundation.cache import UserCache
 
-with UserCache(app="myapp", expiration_time=3600) as cache:
+with UserCache(app="myapp") as cache:
     cache.set("https://example.com/", b"<html>...</html>")
 ```
 

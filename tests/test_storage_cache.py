@@ -207,6 +207,13 @@ class CacheTests(unittest.TestCase):
             self.assertEqual((base_dir / "entries").stat().st_mode & 0o777, 0o700)
             cache.close()
 
+    def test_user_cache_expires_after_a_day_by_default(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temporary_directory,
+            UserCache(app="app", base_dir=Path(temporary_directory)) as cache,
+        ):
+            self.assertEqual(cache.validator.expiration_time, 24 * 60 * 60)
+
     def test_user_cache_prunes_on_open_after_expiration_time(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             base_dir = Path(temporary_directory)

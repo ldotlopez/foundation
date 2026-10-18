@@ -139,7 +139,8 @@ so any string is a valid key, inside an `entries` subdirectory with owner-only
 permissions; the app directory itself, or a caller-provided `base_dir`, is left
 untouched, so cleanup never removes the app's own files or directories. Its
 `app` name must be a safe path component. It has no eviction policy and is
-hands-off: it sets `prune_interval` to its `expiration_time`, so opening it
+hands-off: it sets `prune_interval` to its `expiration_time` (24 hours by
+default), so opening it
 prunes once per expiration period and entries written before one prune have
 expired by the next.
 

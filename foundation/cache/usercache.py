@@ -12,12 +12,14 @@ from .validation import TTLValidator
 # opinion on permissions.
 _USER_CACHE_DIR_MODE = 0o700
 
+_DEFAULT_EXPIRATION_TIME = 24 * 60 * 60
+
 
 class UserCache(Cache):
     """Disk-backed cache in the platform's per-user cache directory for
     `app`, with time-based expiration.
 
-        cache = UserCache(app="foo", expiration_time=3600)
+        cache = UserCache(app="foo")
 
     Entries live in an owner-only `entries` subdirectory, so the app can
     keep its own files beside them. Any string is a valid key.
@@ -31,7 +33,7 @@ class UserCache(Cache):
     def __init__(
         self,
         app: str,
-        expiration_time: float,
+        expiration_time: float = _DEFAULT_EXPIRATION_TIME,
         base_dir: Path | None = None,
     ) -> None:
         """
@@ -40,7 +42,7 @@ class UserCache(Cache):
                 cache directory (e.g. ~/.cache/{app} on Linux). Must
                 be a single safe path segment - no separators or `..`.
             expiration_time: Seconds after which an entry is treated
-                as expired (see TTLValidator).
+                as expired (see TTLValidator). Defaults to 24 hours.
             base_dir: Overrides the platform-derived directory
                 entirely, e.g. for tests. Entries are stored in its
                 `entries` subdirectory; base_dir itself is not changed.
