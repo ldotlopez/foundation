@@ -3,8 +3,7 @@ from __future__ import annotations
 from abc import abstractmethod
 
 from ..dtlib import now_utc_ts
-from ..storage import StorageEntryMetadata
-from .protocols import HasModifiedTime
+from ..storage import HasModifiedTime, StorageEntryMetadata
 
 
 class Validator[T]:
@@ -36,7 +35,7 @@ class TTLValidator(Validator[HasModifiedTime]):
             True if the entry is still valid (not expired), False otherwise
         """
         if not isinstance(metadata, HasModifiedTime):
-            raise TypeError("TTLValidator requires metadata with modified_at")
+            raise TypeError("TTLValidator requires storage metadata with modified_at")
 
         delta = now_utc_ts() - metadata.modified_at
         return delta <= self.expiration_time

@@ -1,5 +1,7 @@
+import sqlite3
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 
 from foundation.cache import (
@@ -15,6 +17,10 @@ from foundation.cache import (
 from foundation.storage import (
     DiskStorage,
     EntryNotFoundError,
+    HasCreatedTime,
+    HasLastAccessTime,
+    HasModifiedTime,
+    HasSize,
     SqliteStorage,
     StorageEntryMetadata,
 )
@@ -25,21 +31,37 @@ class RejectKeyValidator(Validator[StorageEntryMetadata]):
         return metadata.key != "expired"
 
 
+@dataclass(frozen=True)
+class KeyOnlyMetadata:
+    key: str
+
+
 class StorageTests(unittest.TestCase):
     def test_disk_storage_round_trip_metadata_and_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             storage = DiskStorage(Path(temporary_directory))
             storage.set("first-key", b"value")
             metadata_before = storage.get_metadata("first-key")
+            self.assertIsInstance(metadata_before, StorageEntryMetadata)
+            self.assertIsInstance(metadata_before, HasCreatedTime)
+            self.assertIsInstance(metadata_before, HasModifiedTime)
+            self.assertIsInstance(metadata_before, HasLastAccessTime)
+            self.assertIsInstance(metadata_before, HasSize)
 
             self.assertEqual(storage.get("first-key"), b"value")
             self.assertIn("first-key", list(storage.iter()))
             self.assertEqual(storage.get_metadata("first-key").size, 5)
+            storage.set("first-key", b"updated")
+            metadata_after_write = storage.get_metadata("first-key")
+            self.assertEqual(
+                metadata_after_write.created_at, metadata_before.created_at
+            )
+            self.assertEqual(metadata_after_write.size, len(b"updated"))
             value, accessed_metadata = storage.get_with_metadata("first-key")
-            self.assertEqual(value, b"value")
+            self.assertEqual(value, b"updated")
             self.assertGreaterEqual(
                 accessed_metadata.last_access_time,
-                metadata_before.last_access_time,
+                metadata_after_write.last_access_time,
             )
             with self.assertRaises(EntryNotFoundError):
                 storage.get("missing")
@@ -80,6 +102,31 @@ class StorageTests(unittest.TestCase):
             reopened.delete("key")
             self.assertEqual(list(reopened.iter()), [])
             reopened.close()
+
+    def test_sqlite_storage_adds_creation_time_to_existing_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            db_path = Path(temporary_directory) / "legacy.sqlite3"
+            connection = sqlite3.connect(db_path)
+            connection.execute(
+                "CREATE TABLE entries ("
+                "key TEXT PRIMARY KEY, value BLOB NOT NULL, "
+                "modified_at REAL NOT NULL, last_access_time REAL NOT NULL, "
+                "size INTEGER NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO entries VALUES (?, ?, ?, ?, ?)",
+                ("legacy", b"value", 123.0, 124.0, 5),
+            )
+            connection.commit()
+            connection.close()
+
+            storage = SqliteStorage(db_path)
+            metadata = storage.get_metadata("legacy")
+            self.assertEqual(metadata.created_at, 123.0)
+
+            storage.set("legacy", b"updated")
+            self.assertEqual(storage.get_metadata("legacy").created_at, 123.0)
+            storage.close()
 
 
 class CacheTests(unittest.TestCase):
@@ -125,52 +172,30 @@ class CacheTests(unittest.TestCase):
 
             self.assertEqual(len(list(cache.iter())), 1)
 
-    def test_eviction_policy_rejects_incompatible_metadata_at_runtime(self) -> None:
-        class StorageWithoutAccessTime(DiskStorage):
-            def get_metadata(self, key: str) -> StorageEntryMetadata:
-                return StorageEntryMetadata(key=key)
+    def test_storage_metadata_contract_is_key_only_and_capabilities_are_optional(
+        self,
+    ) -> None:
+        metadata = KeyOnlyMetadata("key")
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            cache = Cache(
-                storage=StorageWithoutAccessTime(Path(temporary_directory)),
-                eviction_policy=MaxEntriesEvictionPolicy(max_entries=1),
-            )
-            cache.set("key", b"value")
+        self.assertIsInstance(metadata, StorageEntryMetadata)
+        self.assertNotIsInstance(metadata, HasCreatedTime)
+        self.assertNotIsInstance(metadata, HasModifiedTime)
+        self.assertNotIsInstance(metadata, HasLastAccessTime)
+        self.assertNotIsInstance(metadata, HasSize)
 
-            with self.assertRaisesRegex(TypeError, "last_access_time"):
-                cache.prune()
+    def test_cache_policies_raise_for_missing_metadata_capabilities(self) -> None:
+        metadata = KeyOnlyMetadata("key")
+        count_policy = MaxEntriesEvictionPolicy(max_entries=1)
+        size_policy = SizeEvictionPolicy(max_size_bytes=10)
 
-        class StorageWithoutSize(DiskStorage):
-            def get_metadata(self, key: str) -> StorageEntryMetadata:
-                return StorageEntryMetadata(key=key)
+        with self.assertRaisesRegex(TypeError, "last_access_time"):
+            count_policy.select_for_eviction([metadata])
+        with self.assertRaisesRegex(TypeError, "last_access_time and size"):
+            size_policy.select_for_eviction([metadata])
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            cache = Cache(
-                storage=StorageWithoutSize(Path(temporary_directory)),
-                eviction_policy=SizeEvictionPolicy(max_size_bytes=1),
-            )
-            cache.set("key", b"value")
-
-            with self.assertRaisesRegex(TypeError, "last_access_time and size"):
-                cache.prune()
-
-    def test_ttl_rejects_incompatible_metadata_at_runtime(self) -> None:
-        class StorageWithoutModificationTime(DiskStorage):
-            def get_metadata(self, key: str) -> StorageEntryMetadata:
-                return StorageEntryMetadata(key=key)
-
-            def get_with_metadata(self, key: str) -> tuple[bytes, StorageEntryMetadata]:
-                return self.get(key), self.get_metadata(key)
-
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            cache = Cache(
-                storage=StorageWithoutModificationTime(Path(temporary_directory)),
-                validator=TTLValidator(expiration_time=60),
-            )
-            cache.set("key", b"value")
-
-            with self.assertRaisesRegex(TypeError, "modified_at"):
-                cache.get("key")
+    def test_ttl_validator_raises_for_missing_modified_time(self) -> None:
+        with self.assertRaisesRegex(TypeError, "modified_at"):
+            TTLValidator(expiration_time=60).is_valid(KeyOnlyMetadata("key"))
 
     def test_cache_get_updates_lru_access_time(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import tempfile
 from collections.abc import Iterator
@@ -11,42 +12,22 @@ from ..dtlib import now_utc_ts
 from . import (
     BaseStorage,
     EntryNotFoundError,
-    StorageEntryMetadata,
     validate_path_component,
 )
+from ._index import _MetadataIndex
 
 
 @dataclass(frozen=True)
-class DiskStorageEntryMetadata(StorageEntryMetadata):
+class DiskStorageEntryMetadata:
     """Disk-specific metadata for a storage entry."""
 
+    key: str
+    created_at: float
+    modified_at: float
+    last_access_time: float
+    size: int
     path: Path
     stat: stat_result
-
-    @property
-    def modified_at(self) -> float:
-        """Modification time as a portable float timestamp.
-
-        Satisfies cache.protocols.HasModifiedTime without callers
-        needing to know this backend represents it via stat_result.
-        """
-        return self.stat.st_mtime
-
-    @property
-    def size(self) -> int:
-        """Entry size in bytes. Satisfies cache.protocols.HasSize."""
-        return self.stat.st_size
-
-    @property
-    def last_access_time(self) -> float:
-        """Last-access time as a portable float timestamp.
-
-        Satisfies cache.protocols.HasLastAccessTime. Reflects whatever
-        the OS currently reports for atime. Reads through
-        get_with_metadata() explicitly rewrite atime via os.utime()
-        rather than relying on mount options like noatime/relatime.
-        """
-        return self.stat.st_atime
 
 
 class DiskStorage(BaseStorage):
@@ -66,6 +47,7 @@ class DiskStorage(BaseStorage):
         self.base_dir = base_dir or Path(tempfile.mkdtemp())
         self.dir_mode = dir_mode
         self._mkdir(self.base_dir)
+        self._index = _MetadataIndex(self.base_dir / "disk-metadata.sqlite3")
 
     def _mkdir(self, path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
@@ -77,7 +59,18 @@ class DiskStorage(BaseStorage):
     def set(self, key: str, value: bytes) -> None:
         filepath = self._build_path(key)
         self._mkdir(filepath.parent)
-        filepath.write_bytes(value)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=filepath.parent, delete=False
+            ) as temporary:
+                temporary.write(value)
+                temporary_path = Path(temporary.name)
+            os.replace(temporary_path, filepath)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+        self._index.set(key, key, len(value), now_utc_ts())
 
     def get(self, key: str) -> bytes:
         filepath = self._build_path(key)
@@ -88,6 +81,7 @@ class DiskStorage(BaseStorage):
 
     def delete(self, key: str) -> None:
         filepath = self._build_path(key)
+        self._index.delete(key)
         try:
             filepath.unlink()
         except FileNotFoundError:
@@ -101,7 +95,30 @@ class DiskStorage(BaseStorage):
         except FileNotFoundError as e:
             raise EntryNotFoundError(key) from e
 
-        return DiskStorageEntryMetadata(key=key, path=filepath, stat=stat)
+        indexed = self._index.get(key)
+        if indexed is None:
+            created_at = getattr(stat, "st_birthtime", stat.st_ctime)
+            self._index.register(
+                key,
+                key,
+                created_at,
+                stat.st_mtime,
+                stat.st_atime,
+                stat.st_size,
+            )
+            indexed = self._index.get(key)
+        if indexed is None:
+            raise RuntimeError(f"Metadata index failed to register {key!r}")
+        _, metadata = indexed
+        return DiskStorageEntryMetadata(
+            key=metadata.key,
+            created_at=metadata.created_at,
+            modified_at=metadata.modified_at,
+            last_access_time=metadata.last_access_time,
+            size=stat.st_size,
+            path=filepath,
+            stat=stat,
+        )
 
     def get_with_metadata(self, key: str) -> tuple[bytes, DiskStorageEntryMetadata]:
         """Read a value and explicitly record the access time.
@@ -112,11 +129,34 @@ class DiskStorage(BaseStorage):
         try:
             value = filepath.read_bytes()
             stat_before = filepath.stat()
-            os.utime(filepath, (now_utc_ts(), stat_before.st_mtime))
+            accessed_at = now_utc_ts()
+            os.utime(filepath, (accessed_at, stat_before.st_mtime))
             stat_after = filepath.stat()
         except FileNotFoundError as e:
             raise EntryNotFoundError(key) from e
-        return value, DiskStorageEntryMetadata(key=key, path=filepath, stat=stat_after)
+        indexed = self._index.get(key)
+        if indexed is None:
+            created_at = getattr(stat_after, "st_birthtime", stat_after.st_ctime)
+            self._index.register(
+                key,
+                key,
+                created_at,
+                stat_after.st_mtime,
+                stat_after.st_atime,
+                stat_after.st_size,
+            )
+        metadata = self._index.touch(key, accessed_at, len(value))
+        if metadata is None:
+            raise RuntimeError(f"Metadata index failed to update {key!r}")
+        return value, DiskStorageEntryMetadata(
+            key=metadata.key,
+            created_at=metadata.created_at,
+            modified_at=metadata.modified_at,
+            last_access_time=metadata.last_access_time,
+            size=metadata.size,
+            path=filepath,
+            stat=stat_after,
+        )
 
     def iter(self) -> Iterator[str]:
         # Check the glob expresion against _build_path structure
@@ -141,8 +181,15 @@ class DiskStorage(BaseStorage):
                 removed.append(str(shard_dir))
                 if not dry_run:
                     shard_dir.rmdir()
+            except OSError as error:
+                if error.errno != errno.ENOENT:
+                    raise
 
         return removed
+
+    def close(self) -> None:
+        """Close the SQLite metadata index connection."""
+        self._index.close()
 
     def _build_path(self, key: str) -> Path:
         validate_path_component(key)

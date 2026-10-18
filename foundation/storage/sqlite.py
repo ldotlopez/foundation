@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..dtlib import now_utc_ts
-from . import BaseStorage, EntryNotFoundError, StorageEntryMetadata
+from . import BaseStorage, EntryNotFoundError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -15,9 +15,11 @@ _TABLE = "entries"
 
 
 @dataclass(frozen=True)
-class SqliteStorageEntryMetadata(StorageEntryMetadata):
+class SqliteStorageEntryMetadata:
     """SQLite-specific metadata for a storage entry."""
 
+    key: str
+    created_at: float
     modified_at: float
     last_access_time: float
     size: int
@@ -33,12 +35,10 @@ class SqliteStorage(BaseStorage):
     else) before calling set(), and decode after get() - the same
     way callers would encode/decode before/after DiskStorage.
 
-    Schema note: CREATE TABLE IF NOT EXISTS means an existing
-    database file created before last_access_time/size existed won't
-    be migrated automatically - opening one will fail on the first
-    write, since those columns are NOT NULL with no default. No
-    migration path is provided (pre-1.0, no persisted-data
-    compatibility guarantee yet).
+    Schema note: an existing database file is migrated to add
+    ``created_at`` when needed, using the old ``modified_at`` value.
+    Other schema changes are not migrated automatically (pre-1.0,
+    no general persisted-data compatibility guarantee yet).
     """
 
     def __init__(self, db_path: Path | None = None):
@@ -75,11 +75,20 @@ class SqliteStorage(BaseStorage):
             f"CREATE TABLE IF NOT EXISTS {_TABLE} ("
             "key TEXT PRIMARY KEY, "
             "value BLOB NOT NULL, "
+            "created_at REAL NOT NULL, "
             "modified_at REAL NOT NULL, "
             "last_access_time REAL NOT NULL, "
             "size INTEGER NOT NULL"
             ")"
         )
+        columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({_TABLE})")}
+        if "created_at" not in columns:
+            self._conn.execute(
+                f"ALTER TABLE {_TABLE} ADD COLUMN created_at REAL NOT NULL DEFAULT 0"
+            )
+            self._conn.execute(
+                f"UPDATE {_TABLE} SET created_at = modified_at WHERE created_at = 0"
+            )
 
     def set(self, key: str, value: bytes) -> None:
         # last_access_time is seeded to the write time - an entry
@@ -89,14 +98,14 @@ class SqliteStorage(BaseStorage):
 
         self._conn.execute(
             f"INSERT INTO {_TABLE} "
-            "(key, value, modified_at, last_access_time, size) "
-            "VALUES (?, ?, ?, ?, ?) "
+            "(key, value, created_at, modified_at, last_access_time, size) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET "
             "value = excluded.value, "
             "modified_at = excluded.modified_at, "
             "last_access_time = excluded.last_access_time, "
             "size = excluded.size",
-            (key, value, now, now, len(value)),
+            (key, value, now, now, now, len(value)),
         )
 
     def get(self, key: str) -> bytes:
@@ -112,29 +121,35 @@ class SqliteStorage(BaseStorage):
 
     def get_metadata(self, key: str) -> SqliteStorageEntryMetadata:
         row = self._conn.execute(
-            f"SELECT modified_at, last_access_time, size FROM {_TABLE} WHERE key = ?",
+            f"SELECT created_at, modified_at, last_access_time, size "
+            f"FROM {_TABLE} WHERE key = ?",
             (key,),
         ).fetchone()
         if row is None:
             raise EntryNotFoundError(key)
 
         return SqliteStorageEntryMetadata(
-            key=key, modified_at=row[0], last_access_time=row[1], size=row[2]
+            key=key,
+            created_at=row[0],
+            modified_at=row[1],
+            last_access_time=row[2],
+            size=row[3],
         )
 
     def get_with_metadata(self, key: str) -> tuple[bytes, SqliteStorageEntryMetadata]:
         """Read a value and record its access time in one SQL statement."""
         row = self._conn.execute(
             f"UPDATE {_TABLE} SET last_access_time = ? WHERE key = ? "
-            "RETURNING value, modified_at, last_access_time, size",
+            "RETURNING value, created_at, modified_at, last_access_time, size",
             (now_utc_ts(), key),
         ).fetchone()
         if row is None:
             raise EntryNotFoundError(key)
 
-        value, modified_at, last_access_time, size = row
+        value, created_at, modified_at, last_access_time, size = row
         return bytes(value), SqliteStorageEntryMetadata(
             key=key,
+            created_at=created_at,
             modified_at=modified_at,
             last_access_time=last_access_time,
             size=size,

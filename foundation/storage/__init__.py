@@ -2,14 +2,52 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 
-@dataclass(frozen=True)
-class StorageEntryMetadata:
-    """Base metadata for a storage entry."""
+@runtime_checkable
+class StorageEntryMetadata(Protocol):
+    """Minimal metadata contract shared by all storage backends."""
 
-    key: str
+    @property
+    def key(self) -> str: ...
+
+
+@runtime_checkable
+class HasCreatedTime(Protocol):
+    """Metadata capability for creation timestamps."""
+
+    @property
+    def created_at(self) -> float: ...
+
+
+@runtime_checkable
+class HasModifiedTime(Protocol):
+    """Metadata capability for modification timestamps."""
+
+    @property
+    def modified_at(self) -> float: ...
+
+
+@runtime_checkable
+class HasLastAccessTime(Protocol):
+    """Metadata capability for last-access timestamps."""
+
+    @property
+    def last_access_time(self) -> float: ...
+
+
+@runtime_checkable
+class HasSize(Protocol):
+    """Metadata capability for logical value size in bytes."""
+
+    @property
+    def size(self) -> int: ...
+
+
+@runtime_checkable
+class HasLastAccessTimeAndSize(HasLastAccessTime, HasSize, Protocol):
+    """Metadata capability required by size-based LRU eviction."""
 
 
 class BaseStorage(ABC):
@@ -74,6 +112,15 @@ class EntryNotFoundError(Exception):
         self.entry = entry
 
 
+class StorageCorruptionError(Exception):
+    """An indexed storage entry has missing or invalid backing content."""
+
+    def __init__(self, entry: str, detail: str) -> None:
+        self.entry = entry
+        self.detail = detail
+        super().__init__(f"Storage entry {entry!r} is corrupt: {detail}")
+
+
 def validate_path_component(value: str) -> None:
     """Reject a string that isn't safe to use as a single filesystem
     path segment (a key, an app name, etc.).
@@ -89,14 +136,23 @@ def validate_path_component(value: str) -> None:
 
 
 from .disk import DiskStorage, DiskStorageEntryMetadata
+from .hashed import KeyHashStorage, ValueHashStorage
 from .sqlite import SqliteStorage, SqliteStorageEntryMetadata
 
 __all__ = [
     "BaseStorage",
     "DiskStorage",
     "DiskStorageEntryMetadata",
+    "HasCreatedTime",
+    "HasLastAccessTime",
+    "HasLastAccessTimeAndSize",
+    "HasModifiedTime",
+    "HasSize",
+    "KeyHashStorage",
     "SqliteStorage",
     "SqliteStorageEntryMetadata",
+    "StorageCorruptionError",
     "StorageEntryMetadata",
+    "ValueHashStorage",
     "validate_path_component",
 ]

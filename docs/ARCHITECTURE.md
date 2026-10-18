@@ -32,32 +32,64 @@ The cache is composed from three roles:
    when cache-wide limits are exceeded.
 
 The cache does not encode values. Callers provide bytes and are responsible for
-serialization, for example with `foundation.jsonlib`. `DiskStorage` and
-`SqliteStorage` implement the same storage contract:
+serialization, for example with `foundation.jsonlib`. The storage backends
+implement the same byte key-value contract:
 
 | Backend | Persistence and layout | Metadata/access behavior |
 | --- | --- | --- |
-| `DiskStorage` | One file per key, sharded by the first two key characters beneath `base_dir`; defaults to a temporary directory | Uses filesystem timestamps and size; `get_with_metadata()` explicitly updates access time |
-| `SqliteStorage` | SQLite table with one row per key; an omitted `db_path` selects an in-memory database | Stores modification time, last-access time, and byte size; `get_with_metadata()` updates access time in one SQL statement |
+| `DiskStorage` | One file per safe key, sharded by the first two key characters, plus a SQLite metadata sidecar beneath `base_dir` | Records creation, modification, access times, and logical size; reads through `get_with_metadata()` explicitly update access time |
+| `KeyHashStorage` | One file per SHA-256 key digest under `base_dir`, plus a SQLite key/metadata index | Preserves original keys in the index; supports arbitrary key strings |
+| `ValueHashStorage` | One file per SHA-256 value digest under `base_dir`, plus a SQLite key/metadata index | Deduplicates equal values; metadata and access times are per key |
+| `SqliteStorage` | SQLite table stores one value and metadata row per key; an omitted `db_path` selects an in-memory database | Stores creation, modification, last-access time, and logical byte size; `get_with_metadata()` updates access time in one SQL statement |
 
-Disk keys are validated as safe single path components. SQLite keys are SQL
-values and are stored as-is. `SqliteStorage.close()` releases its connection;
-the in-memory database loses its contents when that connection is closed.
+`DiskStorage` keys are validated as safe single path components. The hashed
+file stores and SQLite accept keys as-is; the hashed stores use SHA-256 only
+for filenames and retain the original key in SQLite. `SqliteStorage.close()`
+releases its connection; the in-memory database loses its contents when that
+connection is closed. The file-backed stores open and close their SQLite
+metadata connection per storage instance; call `close()` when finished with them.
 
-`StorageEntryMetadata` is the backend-neutral metadata base. Backends extend
-it with the properties relevant to cache behavior: `modified_at` for
-`TTLValidator`, `last_access_time` for LRU policies, and `size` for
-`SizeEvictionPolicy`. The cache policies consume structural protocols rather
-than depending directly on a particular backend's metadata class.
+`StorageEntryMetadata` is the minimal storage-owned protocol and requires only
+the original `key`. Optional metadata capabilities are represented separately
+by `HasCreatedTime`, `HasModifiedTime`, `HasLastAccessTime`, and `HasSize`.
+Each backend returns its own metadata object and may expose any combination of
+those capabilities. The current built-in backends happen to expose all four:
+overwrites preserve `created_at` and refresh `modified_at`; reads through
+`get_with_metadata()` refresh `last_access_time`; `size` is logical value size.
+For legacy `DiskStorage` files without an index row, `created_at` is inferred
+from filesystem birth time where available, or inode change time otherwise.
+
+Cache validators and eviction policies declare the metadata capabilities they
+require. For example, `TTLValidator` requires `HasModifiedTime`, LRU entry
+eviction requires `HasLastAccessTime`, and size-based eviction requires both
+`HasLastAccessTime` and `HasSize`. Choosing compatible backends, validators,
+and policies is the caller's responsibility; using a capability that a
+backend does not provide raises `TypeError` when the validator or policy is
+run.
+
+The file-backed stores coordinate content and SQLite metadata with best-effort
+operation ordering, not a cross-resource transaction. They write content
+before metadata and delete metadata before content. An interrupted new write
+can leave an unindexed file; an interrupted key-hash overwrite can leave new
+content with old metadata because that store reuses the same key-derived path.
+In `ValueHashStorage`, deleting or replacing a key removes its old blob only
+after no remaining key references it. In the hashed stores, missing or
+digest-mismatched indexed content raises `StorageCorruptionError`. These stores
+do not provide concurrent-writer coordination or automatic orphan
+reconciliation.
+
+`cleanup()` remains backend maintenance (such as removing empty shard
+directories), not cache pruning or content/metadata reconciliation.
+Reconciliation is deferred and, if introduced, should be an explicit
+operation.
 
 ### Cache operations and limits
 
 - A cache miss is translated from `EntryNotFoundError` into `MissingKeyError`.
-- `get()` reads the value and metadata together, touching access time where
-  the backend supports it. If validation fails, it deletes the entry and raises
-  `ExpiredKeyError`.
-- Validators and eviction policies use structural metadata protocols and check
-  compatibility when they receive an entry.
+- `get()` reads the value and metadata together, touching access time. If
+  validation fails, it deletes the entry and raises `ExpiredKeyError`.
+- Validators and eviction policies consume the specific storage metadata
+  capabilities they require.
 - `prune()` scans for invalid entries and then applies the optional eviction
   policy to valid entries. It returns metadata for entries removed or selected
   for removal during a dry run.
@@ -132,8 +164,13 @@ Click logging flags.
 - **`scrapelib`** parses HTML with Beautiful Soup, extracts content with
   Trafilatura, converts HTML to Markdown, and provides DOM/meta-tag helpers.
 - **`dblib.SQLite3DB`** is a separate lightweight SQLite helper that exposes
-  cursors and a transaction context manager. It is not the cache storage
-  backend.
+  cursors, a transaction context manager, and explicit connection closing. It
+  enables foreign keys, a 5-second busy timeout, WAL journaling, NORMAL
+  synchronous mode, and in-memory temporary storage. WAL improves reader/writer
+  coexistence; NORMAL can lose recent committed transactions on power loss
+  while preserving database consistency. Use SQLite's backup API while the
+  database is open instead of copying only its main file. It is used by
+  file-backed storage indexes, but is not itself a storage backend.
 - **`app.Application`** is a minimal example that stores a name and prints a
   greeting; it is not a lifecycle or dependency-management framework.
 

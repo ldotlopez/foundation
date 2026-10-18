@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from abc import abstractmethod
 
-from .protocols import HasLastAccessTime, HasLastAccessTimeAndSize
+from ..storage import (
+    HasLastAccessTime,
+    HasLastAccessTimeAndSize,
+)
 
 
 class EvictionPolicy[M]:
