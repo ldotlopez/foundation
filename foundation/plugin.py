@@ -328,15 +328,16 @@ class BaseRegister:
         Args:
             ns: Dotted namespace package, passed through to an internal ModuleLoader.
             entry_point: Attribute name of the callable to invoke on each module,
-                e.g. '__foo_entry_point__'. Called with no arguments; its return
-                value is stored as-is under the module's short name.
+                e.g. '__foo_entry_point__'. Called with the extra arguments given
+                to register(), if any; its return value is stored as-is under the
+                module's short name.
         """
         self.ns = ns
         self.entry_point = entry_point
         self._module_loader = ModuleLoader(ns)
         self._registry: dict[str, Any] = {}
 
-    def register(self, name: str) -> None:
+    def register(self, name: str, *args: Any, **kwargs: Any) -> None:
         """
         Load module `name`, call its entry point, and store the result.
 
@@ -344,18 +345,21 @@ class BaseRegister:
             1. Check `name` isn't already registered.
             2. Load the module (via internal ModuleLoader).
             3. Resolve the entry_point attribute on it.
-            4. Call the entry point.
+            4. Call the entry point with `*args` and `**kwargs`.
             5. Store the return value under `name`.
 
         Args:
             name: Short module name, relative to `self.ns`.
+            *args, **kwargs: Forwarded to the entry point, e.g. the plugin's
+                configuration or shared services it needs to build its objects.
 
         Raises:
             AlreadyRegisteredError: `name` is already registered.
             PluginNotFoundError: No such module exists in the namespace.
             PluginImportError: The module exists but raised while importing.
             EntryPointMissingError: The module has no attribute named `entry_point`.
-            EntryPointError: The entry point was found but raised when called.
+            EntryPointError: The entry point was found but raised when called,
+                including a TypeError from arguments its signature doesn't accept.
         """
         if name in self._registry:
             raise AlreadyRegisteredError(f"{name!r} is already registered")
@@ -364,7 +368,7 @@ class BaseRegister:
         entry_point_fn = _resolve_attr(module, self.entry_point, EntryPointMissingError)
 
         try:
-            result = entry_point_fn()
+            result = entry_point_fn(*args, **kwargs)
         except Exception as e:
             raise EntryPointError(
                 f"Entry point {module.__name__}.{self.entry_point} raised: {e}"

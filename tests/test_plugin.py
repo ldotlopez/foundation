@@ -90,6 +90,21 @@ class PluginTests(unittest.TestCase):
         with self.assertRaises(AlreadyRegisteredError):
             register.register("reader")
 
+    def test_base_register_forwards_arguments_to_entry_point(self) -> None:
+        (self.package_path / "configured.py").write_text(
+            "def entry(*args, **kwargs): return (args, kwargs)\n"
+        )
+        importlib.invalidate_caches()
+        register = BaseRegister(self.namespace, "entry")
+
+        register.register("configured", 1, cfg={"key": 2})
+
+        self.assertEqual(register.get("configured"), ((1,), {"cfg": {"key": 2}}))
+        with self.assertRaises(EntryPointError):
+            register.register("reader", cfg={})
+        with self.assertRaises(NotRegisteredError):
+            register.get("reader")
+
     def test_protocol_register_returns_matching_objects(self) -> None:
         register = Register(self.namespace, "entry")
         register.register("reader")
