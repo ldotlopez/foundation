@@ -34,9 +34,14 @@ variable named after the app logger: dots become underscores, the
 whole thing uppercased, with ``_LOG_LEVEL`` appended. E.g. a logger
 named ``myapp`` looks up ``MYAPP_LOG_LEVEL``; ``myapp.sub`` looks up
 ``MYAPP_SUB_LOG_LEVEL``. If that variable isn't set either, the
-default is ``"warning"``. This env-var lookup only makes sense when
-called once at the app's top-level name -- see the module docstring
-above.
+app's ``default_log_level`` applies (``"warning"`` unless given). This
+env-var lookup only makes sense when called once at the app's top-level
+name -- see the module docstring above.
+
+Command-line options win over the env var: with ``-v``/``-q`` and no
+``log_level``, the env var and ``default_log_level`` are ignored and
+they step from ``"warning"``, so ``-v`` is always info and ``-vv``
+always debug.
 
 A plain int (e.g. ``logging.DEBUG``, or ``10``) skips the spec DSL
 entirely and just sets the app logger's level directly.
@@ -148,6 +153,7 @@ def setup_logger(
     logger: str | logging.Logger,
     *,
     log_level: str | int | None = None,
+    default_log_level: str | int = DEFAULT_LOG_LEVEL,
     console: Console | None = None,
     verbose_delta: int = 0,
     quiet_delta: int = 0,
@@ -168,11 +174,14 @@ def setup_logger(
             process-wide console from :func:`get_default_console`.
         log_level: A spec string, a bare level name, a raw int level,
             or None to fall back to an env var (see module docstring).
-        configure_handler: If True (default), attach a Rich handler to
-            `logger` and set ``logger.propagate = False`` (so records
-            aren't also handled further up the hierarchy). Set to
-            False to only apply levels, e.g. in tests, headless runs,
-            or when something else already owns output for this logger.
+        default_log_level: The level when neither `log_level`, -v/-q
+            nor the env var give one, e.g. from the app's config file.
+        verbose_delta, quiet_delta: The -v/-q counts; they step the app
+            logger's own level by their net difference.
+        infect: If True (default), attach a Rich handler to the root
+            logger, once. Set to False to only apply levels, e.g. in
+            tests, headless runs, or when something else already owns
+            output.
 
     Returns:
         The resolved ``logging.Logger`` (useful as ``log =
@@ -188,7 +197,7 @@ def setup_logger(
 
         Headless (no Rich, levels only)::
 
-            >>> setup_logger("myapp", log_level="debug", configure_handler=False)
+            >>> setup_logger("myapp", log_level="debug", infect=False)
     """
     if isinstance(logger, str):
         logger = logging.getLogger(logger)
@@ -197,7 +206,10 @@ def setup_logger(
         console = get_stderr_console()
 
     if log_level is None:
-        log_level = os.environ.get(_env_var_name(logger.name), DEFAULT_LOG_LEVEL)
+        if verbose_delta or quiet_delta:
+            log_level = DEFAULT_LOG_LEVEL
+        else:
+            log_level = os.environ.get(_env_var_name(logger.name), default_log_level)
 
     if isinstance(log_level, int):
         logger.setLevel(log_level)
@@ -242,7 +254,7 @@ def setup_logger_from_cmdline(
         args: The parsed ``argparse.Namespace``. Must use ``log_level``,
             ``verbose``, and ``quiet`` as the option dests.
         console: As in :func:`setup_logger`.
-        configure_handler: As in :func:`setup_logger`.
+        infect: As in :func:`setup_logger`.
 
     Returns:
         The resolved ``logging.Logger``.
@@ -255,24 +267,21 @@ def setup_logger_from_cmdline(
         >>> args = parser.parse_args()
         >>> log = setup_logger_from_cmdline("myapp", args)
     """
-    resolved = setup_logger(
+    return setup_logger(
         logger,
         console=console,
         log_level=getattr(args, "log_level", None),
+        verbose_delta=getattr(args, "verbose", 0) or 0,
+        quiet_delta=getattr(args, "quiet", 0) or 0,
         infect=infect,
     )
-
-    verbose = getattr(args, "verbose", 0) or 0
-    quiet = getattr(args, "quiet", 0) or 0
-    _apply_verbosity_delta(resolved, verbose, quiet)
-
-    return resolved
 
 
 def setup_logger_from_click(
     logger: str | logging.Logger,
     *,
     log_level: str | int | None = None,
+    default_log_level: str | int = DEFAULT_LOG_LEVEL,
     verbose: int = 0,
     quiet: int = 0,
     console: Console | None = None,
@@ -284,7 +293,7 @@ def setup_logger_from_click(
     (there's no Namespace object like argparse), so this takes
     `log_level`/`verbose`/`quiet` directly instead of an args object --
     pass through whatever your @click.option-decorated parameters gave
-    you.
+    you. `default_log_level` is as in :func:`setup_logger`.
 
     Example:
         >>> import click
@@ -299,14 +308,15 @@ def setup_logger_from_click(
         ...     )
         ...     log.info("started")
     """
-    resolved = setup_logger(
+    return setup_logger(
         logger,
         console=console,
         log_level=log_level,
+        default_log_level=default_log_level,
+        verbose_delta=verbose,
+        quiet_delta=quiet,
         infect=infect,
     )
-    _apply_verbosity_delta(resolved, verbose, quiet)
-    return resolved
 
 
 def _resolve_logger_targets(name: str) -> set[str]:

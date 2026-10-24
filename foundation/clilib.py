@@ -40,11 +40,11 @@ def click_logging_options(f):
     f = click.option(
         "--log-level",
         type=str,
-        default=DEFAULT_LOG_LEVEL,
-        show_default=True,
+        default=None,
         help=(
             "Configure Python loggers. Accepts a level (e.g. 'warning') or "
-            "rules like 'exiflib:warning,*:info'."
+            "rules like 'exiflib:warning,*:info'. Without it (or -v/-q), the "
+            f"level comes from <APP>_LOG_LEVEL, else '{DEFAULT_LOG_LEVEL}'."
         ),
     )(f)
     f = click.option(
