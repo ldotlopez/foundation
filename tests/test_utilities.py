@@ -11,6 +11,7 @@ from foundation.dtlib import timestamp_as_dt_aware
 from foundation.jsonlib import dump_json_compatible, load_json_compatible
 from foundation.scrapelib import (
     drop_selectors,
+    find_canonical_url,
     head_meta_get_value_by_name,
     markdownify,
     prune_to_spine,
@@ -61,6 +62,22 @@ class UtilityTests(unittest.TestCase):
         )
         self.assertNotIn("aside", str(spine))
         self.assertIn("# Title", markdownify(article))
+
+    def test_canonical_url_prefers_link_then_og_url(self) -> None:
+        link = "<link rel='canonical alternate' href=' https://a.test/c '>"
+        og_url = "<meta property='og:url' content='https://a.test/og'>"
+        cases = {
+            f"<head>{link}{og_url}</head>": "https://a.test/c",
+            f"<head>{og_url}</head>": "https://a.test/og",
+            f"<head><link rel='canonical' href=' '>{og_url}</head>": "https://a.test/og",
+            "<head><link rel='canonical' href='/s/a?b=1'></head>": "/s/a?b=1",
+            f"<head></head><body>{link}</body>": None,
+            "<html><body><p>No head metadata</p></body></html>": None,
+        }
+        for html, expected in cases.items():
+            with self.subTest(html=html):
+                self.assertEqual(find_canonical_url(html), expected)
+                self.assertEqual(find_canonical_url(soupify(html)), expected)
 
 
 class ExportTests(unittest.TestCase):

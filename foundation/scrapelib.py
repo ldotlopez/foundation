@@ -80,6 +80,30 @@ def head_meta_get_value_by_property(html: bs4.Tag, property: str) -> str:
     return head_meta_get_value(html, attr_filter={"property": property})
 
 
+def find_canonical_url(html: bs4.Tag | str) -> str | None:
+    """Find the canonical URL a page declares about itself.
+
+    Looks for <link rel="canonical"> (RFC 6596) first, then
+    <meta property="og:url">, both inside <head>. Unlike head_meta_get_value(),
+    a missing value is not an error: many pages declare no canonical URL.
+
+    Args:
+        html: The parsed HTML or a raw HTML string (parsed with soupify()).
+
+    Returns:
+        The stripped URL as declared, which may be relative (resolve it with
+        urljoin() against the page URL), or None if the page declares none.
+    """
+    soup = soupify(html) if isinstance(html, str) else html
+    link = soup.select_one('head link[rel~="canonical"][href]')
+    if link is not None and (url := str(link["href"]).strip()):
+        return url
+    meta = soup.select_one('head meta[property="og:url"][content]')
+    if meta is not None and (url := str(meta["content"]).strip()):
+        return url
+    return None
+
+
 #
 # Clean up  and manipulate
 
