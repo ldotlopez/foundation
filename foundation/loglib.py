@@ -56,8 +56,10 @@ import os
 from rich.console import Console
 from rich.logging import RichHandler
 
-from .clilib import RICH_LOG_HIDE_TIMES, get_stderr_console
+from .clilib import RICH_LOG_HIDE_TIMES, RICH_STDERR_ENABLED, get_stderr_console
 from .consts import DEFAULT_LOG_LEVEL
+
+_PLAIN_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 LOGGER = logging.getLogger(__name__)
 
@@ -112,9 +114,31 @@ def _env_var_name(logger_name: str) -> str:
     return logger_name.replace(".", "_").upper() + "_LOG_LEVEL"
 
 
-def _has_rich_handler(logger: logging.Logger) -> bool:
-    """True if this exact logger already has a RichHandler attached."""
-    return any(isinstance(handler, RichHandler) for handler in logger.handlers)
+class _ConsoleStreamHandler(logging.StreamHandler):
+    """Plain records to the console's file, looked up on every record as
+    rich does, so a swapped ``sys.stderr`` (e.g. a test runner's) is
+    honored, like the stdlib's ``logging.lastResort``."""
+
+    def __init__(self, console: Console) -> None:
+        self._console = console
+        super().__init__()
+        self.setFormatter(logging.Formatter(_PLAIN_LOG_FORMAT))
+
+    @property
+    def stream(self):
+        return self._console.file
+
+    @stream.setter
+    def stream(self, value) -> None:
+        """Ignored: the stream is always the console's file."""
+
+
+def _has_handler(logger: logging.Logger) -> bool:
+    """True if this exact logger already has a handler from setup_logger."""
+    return any(
+        isinstance(handler, RichHandler | _ConsoleStreamHandler)
+        for handler in logger.handlers
+    )
 
 
 def _step_verbosity(level: int, steps: int) -> int:
@@ -159,7 +183,7 @@ def setup_logger(
     quiet_delta: int = 0,
     infect: bool = True,
 ) -> logging.Logger:
-    """Set up one app logger: attach a Rich handler and apply a level/spec.
+    """Set up one app logger: attach a handler and apply a level/spec.
 
     Meant to be called exactly once per app, at startup, at the app's
     top-level logger name -- see the module docstring for why. Safe to
@@ -178,10 +202,11 @@ def setup_logger(
             nor the env var give one, e.g. from the app's config file.
         verbose_delta, quiet_delta: The -v/-q counts; they step the app
             logger's own level by their net difference.
-        infect: If True (default), attach a Rich handler to the root
-            logger, once. Set to False to only apply levels, e.g. in
-            tests, headless runs, or when something else already owns
-            output.
+        infect: If True (default), attach a handler to the root logger,
+            once: a Rich handler when stderr is rich
+            (``RICH_STDERR_ENABLED``), else one plain line per record
+            (``time LEVEL name: message``). Set to False to only apply levels,
+            e.g. in tests or when something else already owns output.
 
     Returns:
         The resolved ``logging.Logger`` (useful as ``log =
@@ -219,14 +244,16 @@ def setup_logger(
 
     _apply_verbosity_delta(logger, verbose_delta, quiet_delta)
 
-    if infect and not _has_rich_handler(logging.root):
-        handler = RichHandler(
-            console=console,
-            rich_tracebacks=True,
-            show_time=not RICH_LOG_HIDE_TIMES,
-            omit_repeated_times=False,
-        )
-        # handler.setFormatter(CustomFormatter("%(name)s: %(message)s"))
+    if infect and not _has_handler(logging.root):
+        if RICH_STDERR_ENABLED:
+            handler = RichHandler(
+                console=console,
+                rich_tracebacks=True,
+                show_time=not RICH_LOG_HIDE_TIMES,
+                omit_repeated_times=False,
+            )
+        else:
+            handler = _ConsoleStreamHandler(console)
         logging.root.addHandler(handler)
 
     return logger

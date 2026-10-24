@@ -1,4 +1,6 @@
 import os
+import sys
+from typing import TextIO
 
 import click
 from rich.console import Console
@@ -6,9 +8,11 @@ from rich.console import Console
 from .consts import DEFAULT_LOG_LEVEL
 
 __all__ = [
-    "RICH_DISABLED",
-    "RICH_ENABLED",
     "RICH_LOG_HIDE_TIMES",
+    "RICH_STDERR_DISABLED",
+    "RICH_STDERR_ENABLED",
+    "RICH_STDOUT_DISABLED",
+    "RICH_STDOUT_ENABLED",
     "click_logging_options",
     "get_default_console",
     "get_stderr_console",
@@ -18,21 +22,30 @@ __all__ = [
 _STDOUT_CONSOLE: Console | None = None
 _STDERR_CONSOLE: Console | None = None
 
-_no_color = os.environ.get("NO_COLOR", "").lower() in ("1", "true", "yes")
-_rich_disabled = os.environ.get("RICH_DISABLED", "").lower() in (
-    "1",
-    "true",
-    "yes",
-) or os.environ.get("DISABLE_RICH", "").lower() in ("1", "true", "yes")
 
-RICH_ENABLED = not _no_color and not _rich_disabled
-RICH_DISABLED = not RICH_ENABLED
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").lower() in ("1", "true", "yes")
 
-RICH_LOG_HIDE_TIMES = os.environ.get("RICH_LOG_HIDE_TIMES", "").lower() in (
-    "1",
-    "true",
-    "yes",
-)
+
+def _rich_on(stream: TextIO | None) -> bool:
+    """Whether rich output suits `stream`: a terminal, rich not disabled
+    (`RICH_DISABLED`, `DISABLE_RICH`) and `TERM` not dumb. `NO_COLOR` only
+    drops colors, which rich honors by itself."""
+    if _env_flag("RICH_DISABLED") or _env_flag("DISABLE_RICH"):
+        return False
+    if os.environ.get("TERM") == "dumb":
+        return False
+    return stream is not None and stream.isatty()
+
+
+# Each stream is rich only when it is a terminal: stdout carries results
+# (tables, contents, help), stderr diagnostics (progress, logs).
+RICH_STDOUT_ENABLED = _rich_on(sys.stdout)
+RICH_STDOUT_DISABLED = not RICH_STDOUT_ENABLED
+RICH_STDERR_ENABLED = _rich_on(sys.stderr)
+RICH_STDERR_DISABLED = not RICH_STDERR_ENABLED
+
+RICH_LOG_HIDE_TIMES = _env_flag("RICH_LOG_HIDE_TIMES")
 
 
 def click_logging_options(f):
